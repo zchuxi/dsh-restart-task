@@ -44,7 +44,9 @@
     "cordis.patch.yml",
     "icon.svg",
     "README.md",
-    "README.zh.md",
+    "README.en.md",
+    "docs/settings-card-1.png",
+    "docs/settings-card-2.png",
     "restart-task.test.mjs"
   ],
   "engines": {
