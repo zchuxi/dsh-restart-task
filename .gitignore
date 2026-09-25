@@ -1,0 +1,18 @@
+# Installed dependencies and build products — never published. The plugin is
+# consumed as source (the host half is `lib/index.js`, the browser half is the
+# ModuleLoader bundle `lib/client.js`), so a checkout needs `npm install` and
+# nothing else.
+node_modules/
+package-lock.json
+
+# Local scratch: profile tarballs, backups of earlier iterations, probe profiles.
+*.bak
+*.bak-*
+*.tgz
+tmp/
+
+# Editor and OS noise.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

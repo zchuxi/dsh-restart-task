@@ -1,0 +1,35 @@
+name: test
+
+# The plugin is consumed as source: a checkout needs its one runtime dependency
+# and nothing else. `--legacy-peer-deps` is deliberate — the `@deepseek-ai/dsh`
+# peer is the *host* the plugin runs inside, supplied by the DSH installation, so
+# npm must not try to download a whole harness to run this package's own suite.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  harness:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install the runtime dependency
+        run: npm install --legacy-peer-deps --no-audit --no-fund
+      - name: Syntax-check both halves
+        run: |
+          node --check lib/index.js
+          node --check lib/client.js
+      - name: Run the regression harness
+        run: npm test
+      - name: Pack the published artifact
+        run: npm pack --dry-run

@@ -1,0 +1,17 @@
+# Profile bundle patch for dsh-restart-task.
+#
+# Read from this package's `dsh.bundle.patch` manifest field and applied as a
+# profile layer, in the order `dsh.profile.bundles` lists it. The row mounts the
+# package's host half; the browser half is the package's "./client" export
+# (`lib/client.js`, ModuleLoader bundle published under the same package name).
+#
+# The row id is not decoration: since DSH 0.1.7 the settings form addresses a
+# plugin by its **profile entry id**, so `restart-task` here is also the id
+# `ENTRY_ID` (lib/index.js) and `ENTRY_ID` (lib/client.js) spell out. Renaming
+# this row means renaming both, and the regression harness fails if they drift.
+# The browser half's own contribution to the Plugins page is keyed separately, by
+# this package's name (`dsh-restart-task`), because that page keys a *bundle's*
+# configuration page by the bundle's package name.
+- insert:
+    - id: restart-task
+      name: 'dsh-restart-task'

@@ -1,0 +1,70 @@
+{
+  "name": "dsh-restart-task",
+  "version": "1.2.0",
+  "description": "DSH web plugin: a three-tier recovery policy for broken turns — silent in-turn retry, in-turn keep-alive for truncated output, and an opt-in continuation turn — with a round control in the composer, the shipped send button taking over as \"continue\", and a settings card.",
+  "type": "module",
+  "main": "lib/index.js",
+  "icon": "icon.svg",
+  "license": "MIT",
+  "author": "zchuxi",
+  "homepage": "https://github.com/zchuxi/dsh-restart-task#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zchuxi/dsh-restart-task.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zchuxi/dsh-restart-task/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "web-plugin",
+    "agent-loop",
+    "retry",
+    "keep-alive",
+    "continuation"
+  ],
+  "scripts": {
+    "test": "node restart-task.test.mjs"
+  },
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "README.zh.md",
+    "restart-task.test.mjs"
+  ],
+  "engines": {
+    "node": ">=24",
+    "dsh": ">=0.1.7-rc.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.1.7-rc.2"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.4"
+  }
+}

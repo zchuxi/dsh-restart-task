@@ -1,0 +1,8 @@
+# Keep the published artifact byte-stable across platforms: the plugin is
+# consumed as source, and a CRLF-converted file would change what a Windows
+# checkout runs compared to what the tarball holds.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.webp binary
