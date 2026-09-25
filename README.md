@@ -19,7 +19,9 @@ DeepSeek Harness **Web profile 插件**：输入框里的一个回合恢复控�
 
 ## 0. 适用版本
 
-针对 **DSH 0.1.7-rc.2** 编写，并且在 loader 会真正校验的地方写明了这一点：`peerDependencies["@deepseek-ai/dsh"]` 为 `>=0.1.7-rc.2`（强制字段），声明性的 `engines.dsh` 与之保持一致，插件自带的 `@deepseek-ai/schemastery` 为 `^3.18.4`（第一个支持 `.volatile()` schema 的版本，下面的配置模型依赖它）。
+针对 **DSH 0.1.7-rc.1 及其后的 0.1.x** 编写，并且在 loader 会真正校验的地方写明了这一点：`peerDependencies["@deepseek-ai/dsh"]` 为 `>=0.1.7-rc.1 <0.1.8-0 || >=0.1.8-rc.1 <0.2.0-0`（强制字段），声明性的 `engines.dsh` 与之保持一致，插件自带的 `@deepseek-ai/schemastery` 为 `^3.18.4`（第一个支持 `.volatile()` schema 的版本，下面的配置模型依赖它）。
+
+> 范围为什么要写成两段：node-semver 只有当范围里**某个比较符**与该版本的 `major.minor.patch` 元组完全一致、且自身带预发布标签时，才放行预发布版本。写成看着更宽的 `>=0.1.7-rc.1` 时，`0.1.8-rc.1` 这类下一条补丁线的 rc 会被**静默排除**，用户只会撞上 ERESOLVE（或 loader 直接跳过这个 bundle）。所以每个受支持的元组各占一段，并用 `<0.2.0-0` 把下一个大版本挡在外面 —— 0.2.0 上能否工作没有验证过，宁可让 loader 明确跳过。
 
 版本之所以关键，是因为本插件赖以生存的两条接缝都变了：
 
@@ -211,6 +213,9 @@ nav[data-dyn-continued-preview='1'] [class*='_previewPrompt'] { display: none !i
 - `lib/index.js` —— 宿主半边：每个字段都 `.volatile()` 的 `Config`、同轮重试、同轮续写、可选的继续回合、`continue-task` 命令。
 - `lib/client.js` —— 浏览器半边：`window.__ModuleLoader__.load` bundle，导出 `apply` + `inject`（`['slots', 'timer']`）、输入框控件、插件页卡片（挂在可选的 `configForms` 子上下文上），以及给本插件自己的行打标、呈现其继续出的轮次、并在输入框为空时把继续交给产品发送键的对话记录遍历。
 - `restart-task.test.mjs` —— 回归测试（见下）。
+- `screenshots.json` —— 市场详情页展示的 1–8 张截图（见 §8）；`docs/awesome-dsh-plugin-entry.yml` —— 提交或更新
+  [`awesome-dsh-plugin`](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 收录时复制过去的那一条目。截图刻意放在本仓库：
+  换图只需往这里推一次，不用去那边提 PR、等维护者。
 
 输入框控件的形状刻意用 `!important` 钉住：它住在产品的 composer 工具行里，那一行有自己的 button/svg 规则。设置卡片使用产品的 `--dsw-alias-*` token，并在不依赖任何东西的前提下匹配其卡片外观（`.5px` 边框、16px 圆角、14–16px 头部内边距）。两个注入的 `<style>` 标签都带 `data-plugin`，因为模块系统按该属性归属样式：没有归属的标签会被下一个物化的插件认领，并在*那个*插件卸载时被删掉。
 
@@ -272,6 +277,6 @@ bundle 通过其 `dsh.bundle.patch` 清单字段加入 `dsh.profile.bundles`；�
 
 > 本地 checkout 请放在**不含空格**的路径下。`dsh plugin` 会把参数经 shell 转发，含空格的路径会被拆成若干个错误依赖。
 
-**环境要求。** DSH `>=0.1.7-rc.2`（声明为会被真正校验的 `peerDependencies["@deepseek-ai/dsh"]` 范围，因此更旧的运行时会在启动时按 loader 的兼容性提示跳过 bundle，而不是在内部某处出错）、Node `>=24`，以及一个运行时依赖 —— `@deepseek-ai/schemastery ^3.18.4`（第一个 schema 能 `.volatile()` 的版本）。开发用 checkout 请用 `npm install --legacy-peer-deps` 安装：`@deepseek-ai/dsh` 这个 peer 是插件运行所在的宿主，不该作为构建依赖被拖下来。
+**环境要求。** DSH `>=0.1.7-rc.1 <0.1.8-0 || >=0.1.8-rc.1 <0.2.0-0`（声明为会被真正校验的 `peerDependencies["@deepseek-ai/dsh"]` 范围，因此更旧的运行时会在启动时按 loader 的兼容性提示跳过 bundle，而不是在内部某处出错）、Node `>=24`，以及一个运行时依赖 —— `@deepseek-ai/schemastery ^3.18.4`（第一个 schema 能 `.volatile()` 的版本）。开发用 checkout 请用 `npm install --legacy-peer-deps` 安装：`@deepseek-ai/dsh` 这个 peer 是插件运行所在的宿主，不该作为构建依赖被拖下来。
 
 **浏览器半边是热重载的**：`dsh-client-hmr` 会轮询每个客户端 bundle 的修改时间，把重建后的版本换进正在运行的页面，所以编辑 `lib/client.js` 保存即生效。**宿主半边需要重启 profile** —— `agent/turn-stopping` 和新的设置键都要等 `lib/index.js` 重新加载后才存在。

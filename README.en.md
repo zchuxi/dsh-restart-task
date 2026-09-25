@@ -20,11 +20,20 @@ The design rule everything follows: **a recovered request should leave no trace.
 
 ## 0. Which DSH this is for
 
-Written against **DSH 0.1.7-rc.2**, and it says so where the loader looks:
-`peerDependencies["@deepseek-ai/dsh"]` is `>=0.1.7-rc.2` (the enforced field), the
+Written against **DSH 0.1.7-rc.1 and the 0.1.x line after it**, and it says so where
+the loader looks: `peerDependencies["@deepseek-ai/dsh"]` is
+`>=0.1.7-rc.1 <0.1.8-0 || >=0.1.8-rc.1 <0.2.0-0` (the enforced field), the
 declarative `engines.dsh` agrees, and the plugin's `@deepseek-ai/schemastery` is
 `^3.18.4` — the first release with `.volatile()` schemas, which the settings model
 below is built on.
+
+> Why the range has two branches: node-semver only lets a prerelease satisfy a
+> range when some comparator **on that version's `major.minor.patch` tuple** carries
+> a prerelease tag of its own. A range that looks broader, `>=0.1.7-rc.1`, silently
+> excludes the next patch line's release candidates (`0.1.8-rc.1`) — the user meets
+> an `ERESOLVE`, or the loader skips the bundle. So each supported tuple gets its
+> own branch, and `<0.2.0-0` keeps the next major out: 0.2.0 is unverified here, and
+> an explicit skip is better than an unverified load.
 
 The version matters because the two seams this plugin lives on both changed:
 
@@ -425,6 +434,11 @@ in memory for that session) is labelled too.
   opened, and hands the shipped send button the continuation while the composer
   is empty.
 - `restart-task.test.mjs` — the regression harness (below).
+- `screenshots.json` — the 1–8 images a storefront shows for this plugin (§8), and
+  `docs/awesome-dsh-plugin-entry.yml` — the entry to copy into
+  [`awesome-dsh-plugin`](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)
+  when submitting or updating the listing there. Screenshots live in this
+  repository on purpose: changing one is a push here, not a pull request there.
 
 The control's shape is pinned with `!important` on purpose: it lives inside the
 product composer tool row, which has its own button and `svg` rules. The settings
@@ -558,13 +572,14 @@ field; removing the dependency removes the row again on the next start.
 > arguments through a shell, so a path containing spaces is split into several
 > bogus dependencies.
 
-**Requirements.** DSH `>=0.1.7-rc.2` (declared as an enforced
-`peerDependencies["@deepseek-ai/dsh"]` range, so an older runtime skips the bundle
-with the loader's own compatibility line instead of failing somewhere inside it),
-Node `>=24`, and one runtime dependency — `@deepseek-ai/schemastery ^3.18.4`, the
-first release whose schemas can be `.volatile()`. A development checkout installs
-it with `npm install --legacy-peer-deps`: the `@deepseek-ai/dsh` peer is the host
-the plugin runs inside and must not be dragged in as a build dependency.
+**Requirements.** DSH `>=0.1.7-rc.1 <0.1.8-0 || >=0.1.8-rc.1 <0.2.0-0` (declared as
+an enforced `peerDependencies["@deepseek-ai/dsh"]` range, so an older runtime skips
+the bundle with the loader's own compatibility line instead of failing somewhere
+inside it), Node `>=24`, and one runtime dependency — `@deepseek-ai/schemastery
+^3.18.4`, the first release whose schemas can be `.volatile()`. A development
+checkout installs it with `npm install --legacy-peer-deps`: the `@deepseek-ai/dsh`
+peer is the host the plugin runs inside and must not be dragged in as a build
+dependency.
 
 The **browser half hot-reloads**: `dsh-client-hmr` stat-polls every client bundle
 and swaps a rebuilt one into the running page, so editing `lib/client.js` shows

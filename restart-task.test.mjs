@@ -368,8 +368,16 @@ equal('identity: the card is keyed by the package name', client.BUNDLE_NAME, man
 equal('identity: the host half names the same bundle', hostModule.BUNDLE_NAME, manifest.name)
 equal('identity: the producer kind is the package name', hostModule.SOURCE_KIND, manifest.name)
 equal('identity: both halves agree on the producer kind', client.OWN_SOURCE_KIND, hostModule.SOURCE_KIND)
-equal('identity: the manifest requires the settings-era runtime', manifest.peerDependencies['@deepseek-ai/dsh'], '>=0.1.7-rc.2')
-equal('identity: the engines range agrees', manifest.engines.dsh, '>=0.1.7-rc.2')
+// node-semver only lets a prerelease satisfy a range when a comparator on the same
+// major.minor.patch tuple carries a prerelease tag, so each supported tuple needs
+// its own branch: an open-ended `>=0.1.7-rc.1` admits the next *stable* patch but
+// silently excludes its release candidates, which is how a broad-looking range
+// locks users out of the next harness rc.
+const RUNTIME_RANGE = '>=0.1.7-rc.1 <0.1.8-0 || >=0.1.8-rc.1 <0.2.0-0'
+equal('identity: the manifest requires the settings-era runtime', manifest.peerDependencies['@deepseek-ai/dsh'], RUNTIME_RANGE)
+equal('identity: the engines range agrees', manifest.engines.dsh, RUNTIME_RANGE)
+equal('identity: every supported tuple carries a prerelease branch', (RUNTIME_RANGE.match(/>=0\.\d+\.\d+-rc\.\d+/g) ?? []).length, 2)
+equal('identity: the range keeps the next major out', RUNTIME_RANGE.includes('<0.2.0-0'), true)
 
 // ------------------------------------------------- settings wiring / consistency
 /** Every settings key the host half declares. */

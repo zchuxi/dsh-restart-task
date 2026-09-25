@@ -1,6 +1,6 @@
 {
   "name": "dsh-restart-task",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "DSH web plugin: a three-tier recovery policy for broken turns — silent in-turn retry, in-turn keep-alive for truncated output, and an opt-in continuation turn — with a round control in the composer, the shipped send button taking over as \"continue\", and a settings card.",
   "type": "module",
   "main": "lib/index.js",
@@ -43,6 +43,7 @@
     "lib/client.js",
     "cordis.patch.yml",
     "icon.svg",
+    "screenshots.json",
     "README.md",
     "README.en.md",
     "docs/settings-card-1.png",
@@ -51,10 +52,10 @@
   ],
   "engines": {
     "node": ">=24",
-    "dsh": ">=0.1.7-rc.2"
+    "dsh": ">=0.1.7-rc.1 <0.1.8-0 || >=0.1.8-rc.1 <0.2.0-0"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh": ">=0.1.7-rc.2"
+    "@deepseek-ai/dsh": ">=0.1.7-rc.1 <0.1.8-0 || >=0.1.8-rc.1 <0.2.0-0"
   },
   "dsh": {
     "manifestVersion": 1,

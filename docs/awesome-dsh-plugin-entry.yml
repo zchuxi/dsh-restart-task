@@ -1,0 +1,26 @@
+# Submission file for the awesome-dsh-plugin list.
+#
+# The list keeps its data in `data/plugins/`, one YAML file per plugin, named
+# after the repository. This file is that entry, verbatim: copy it to
+# `data/plugins/zchuxi__dsh-restart-task.yml` in
+# https://github.com/awesome-dsh-plugin/awesome-dsh-plugin and open the PR — one
+# file is the whole submission, and the READMEs there are generated from it.
+#
+# Everything below is checked as a claim about this repository:
+#
+#   - `dsh.bundle` lives in package.json, with cordis.patch.yml next to it;
+#   - the description avoids numbers and API names it would have to keep true,
+#     and states only what the code does: three recovery tiers, and the send
+#     button carrying the continuation while the composer is empty;
+#   - `category: ui` because what a reader gets is composer and settings-surface
+#     behaviour, not a model, memory or tool integration;
+#   - `tarball` is the prebuilt package on this repository's own release, pinned
+#     to a tag (a pinned tag never rots, so a version-free asset name is fine
+#     and the URL keeps working across releases).
+url: https://github.com/zchuxi/dsh-restart-task
+name: zchuxi/dsh-restart-task
+category: ui
+description:
+  en: Recovers broken DSH turns with an in-turn retry, an in-turn keep-alive for truncated output and an opt-in continuation turn, and hands the composer's send button the continuation while the composer is empty.
+  zh: 三段式恢复被打断的回合（同一步内静默重试、输出超限同轮续写、可选的新开一轮继续），并在输入框为空时把「继续」交给发送键。
+tarball: https://github.com/zchuxi/dsh-restart-task/releases/download/v1.2.1/dsh-restart-task.tgz
