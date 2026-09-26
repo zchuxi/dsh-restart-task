@@ -93,7 +93,12 @@ is written narrowly:
 - It may only take a control the product **cannot use** — `disabled` is the
   condition, which is why a composer the human is typing in is never touched.
   Taking it over means clearing `disabled`, and the observer re-applies the
-  takeover if React ever writes it back.
+  takeover if React ever writes it back. Because the takeover clears exactly the
+  signal it gated on, the **draft itself is re-read** on every pass and again at
+  the click: the moment the composer holds something, the takeover lets go, the
+  product's label comes back and the human's message sends. A takeover that
+  outlived the empty composer would turn a written message into a continuation,
+  which is worse than no takeover at all.
 - The click is intercepted in the **capture phase on `document`** and stopped
   there: the product's handler rides React's listener on the root container, which
   is below that point, so the send path never also fires. Every other click in the
@@ -102,10 +107,12 @@ is written narrowly:
   control (which is hidden by CSS while the button carries the action, and still
   mounted), so both affordances share one busy guard, one double-click fence and
   one outcome flash — the button turns green / red / spins with the same state.
-- Releasing removes the attributes and restores the label the product gave the
-  button, and deliberately does **not** write `disabled`: a wrongly enabled send
-  button refuses an empty draft anyway, while a wrongly disabled one would eat the
-  human's own message.
+- Releasing removes the attributes, restores the label the product gave the button,
+  and restores the product's own verdict for an **empty** composer (`disabled`) —
+  without that, the control would sit enabled-but-idle for the rest of the session
+  and no later continuation could be offered through it. A composer that holds a
+  draft keeps whatever the product rendered, because that message is exactly what
+  must stay sendable.
 - `hideContinueRow` and this switch are independent, and both can be turned off in
   the card. With the takeover off, the round control is the only affordance and
   the send button is left exactly as shipped.

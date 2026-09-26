@@ -520,7 +520,9 @@ equal('send: nothing writes the product\'s class list', /\.className\s*=/.test(c
 equal('send: the click is intercepted in the capture phase', clientSource.includes("document.addEventListener('click', onClick, true)"), true)
 equal('send: and released when the plugin unloads', clientSource.includes("document.removeEventListener('click', onClick, true)"), true)
 equal('send: it runs the control\'s own action, not a copy of it', clientSource.includes("document.querySelector('.dyn-retry-round')"), true)
-equal('send: the release leaves `disabled` to the product', clientSource.includes('deliberately does not write `disabled`'), true)
+equal('send: a draft is re-read before the takeover is kept', clientSource.includes('composerHasDraft(cardOf(button)) !== true'), true)
+equal('send: a click with a draft is re-checked at the click', clientSource.includes('if (composerHasDraft(cardOf(button)) === true) return'), true)
+equal('send: the release restores the product\'s empty-composer verdict', clientSource.includes('if (composerHasDraft(cardOf(button)) !== true) button.disabled = true'), true)
 // Session format v4 refuses the retired `{ kind: 'plugin', plugin: … }` wrapper
 // on newly appended messages, so the continuation must carry this producer's
 // own kind. Regressing to `'plugin'` fails the whole turn.
@@ -812,6 +814,10 @@ function stubDom() {
     if (selector === '[data-context-source]') return node.attributes['data-context-source'] !== undefined
     if (selector === '[data-chat-turn]') return node.attributes['data-chat-turn'] !== undefined
     if (selector === '[data-composer-card]') return node.attributes['data-composer-card'] !== undefined
+    if (selector === '[contenteditable="true"]') return node.attributes.contenteditable === 'true'
+    if (selector === '[class*="_attachment"], [class*="_reference"], [class*="_chip"]') {
+      return ['_attachment', '_reference', '_chip'].some((part) => className(node).includes(part))
+    }
     if (selector === '[data-chat-flow-kind]') return node.attributes['data-chat-flow-kind'] !== undefined
     if (selector === '[data-chat-flow-kind="turn-trigger"]') return node.attributes['data-chat-flow-kind'] === 'turn-trigger'
     if (selector === '[data-dyn-restart-row]') return node.attributes['data-dyn-restart-row'] !== undefined
@@ -1042,17 +1048,20 @@ function transcriptDom() {
   marks.offsetHeight = 30
   nav.append(marks)
   // The composer: the shipped primary control (empty draft ⇒ disabled) and this
-  // plugin's own round control, both inside the composer card.
+  // plugin's own round control, both inside the composer card. The editor is the
+  // draft the takeover has to watch once it holds the button.
   const card = dom.make('div', { 'data-composer-card': 'true' })
+  const editor = dom.make('div', { contenteditable: 'true' })
   const send = dom.make('button', { class: 'uV2eYG_primary', 'aria-label': '发送消息', disabled: 'true' })
   send.disabled = true
   const round = dom.make('button', { class: 'dyn-retry-round' })
   round.clicks = 0
   round.click = () => { round.clicks += 1 }
+  card.append(editor)
   card.append(send)
   card.append(round)
   for (const node of [triggerRow, humanRow, steerRow, foreignTrigger, foreignContext, nav, card]) dom.document.body.append(node)
-  return { dom, triggerRow, humanRow, steerRow, foreignTrigger, foreignContext, nav, marks, mark7, mark6, mark5, card, send, round }
+  return { dom, triggerRow, humanRow, steerRow, foreignTrigger, foreignContext, nav, marks, mark7, mark6, mark5, card, editor, send, round }
 }
 
 /** The window of a real session: a human round with a steer, then our own round. */
@@ -1231,6 +1240,59 @@ typingRuntime.mountControl()
 typingRuntime.flush()
 equal('send: a non-empty composer keeps its own button', typingDom.send.getAttribute('data-dyn-continue'), null)
 equal('send: and its own label', typingDom.send.getAttribute('aria-label'), '发送消息')
+
+// ---- the takeover must not outlive the empty composer ------------------------
+// Reported: with the turn stopped, the composer showed the orange continue control
+// *while the human's message sat in it*, so clicking continued the old task instead
+// of sending. The takeover clears the product's own `disabled`, which is why the
+// draft itself has to be re-read — a held button that never lets go is worse than
+// no takeover at all.
+const stickyDom = transcriptDom()
+const stickyRuntime = makeClientRuntime(stickyDom.dom, { hideContinueRow: true, continuedRailMarks: 'hide', sendBecomesContinue: true }, continuationWindow)
+clientBundleExports.apply(stickyRuntime.ctx)
+stickyRuntime.flush()
+stickyRuntime.mountControl()
+stickyRuntime.flush()
+equal('sticky: taken while the composer is empty', stickyDom.send.getAttribute('data-dyn-continue'), '1')
+// The human types. The product re-renders on every keystroke and re-applies its own
+// verdict (`disabled = empty`), which the stub mirrors — and the takeover must let
+// go on the next pass and give the label back.
+const typeDraft = (text) => {
+  stickyDom.editor.textContent = text
+  const empty = text.replace(/[\u200b\u200c\ufeff]/g, '').trim() === ''
+  stickyDom.send.disabled = empty
+}
+typeDraft('帮我写一个对话历史管理插件')
+stickyRuntime.sweep()
+stickyRuntime.flush()
+equal('sticky: typing hands the button straight back', stickyDom.send.getAttribute('data-dyn-continue'), null)
+equal('sticky: with the product\'s own label', stickyDom.send.getAttribute('aria-label'), '发送消息')
+equal('sticky: and the human\'s message stays sendable', stickyDom.send.disabled, false)
+// Clearing the draft again re-offers it — the gate is the draft, not a one-way door.
+typeDraft('')
+stickyRuntime.sweep()
+stickyRuntime.flush()
+equal('sticky: an empty composer offers it again', stickyDom.send.getAttribute('data-dyn-continue'), '1')
+// And even inside one debounce window — typed, not yet swept — the click itself
+// must reach the product instead of running the continuation.
+typeDraft('新的一段话')
+const stickyCapture = [...(stickyDom.dom.documentListeners.get('click') ?? [])]
+const stickyFlags = { prevented: 0 }
+globalThis.document = stickyDom.dom.document
+const beforeClicks = stickyDom.round.clicks
+stickyCapture[0]({
+  target: stickyDom.send,
+  preventDefault: () => { stickyFlags.prevented += 1 },
+  stopPropagation: () => {},
+  stopImmediatePropagation: () => {},
+})
+equal('sticky: a click with a draft is never intercepted', stickyFlags.prevented, 0)
+equal('sticky: and never continues the old task', stickyDom.round.clicks, beforeClicks)
+// The editor's zero-width padding is not a draft.
+typeDraft('\u200b')
+stickyRuntime.sweep()
+stickyRuntime.flush()
+equal('sticky: zero-width padding still counts as empty', stickyDom.send.getAttribute('data-dyn-continue'), '1')
 
 // A turn the agent is already re-running offers nothing, so it takes nothing: the
 // control's own `show` decides the offer, not the bare mode.
