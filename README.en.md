@@ -61,6 +61,7 @@ cluster, immediately left of the shipped submit button.
 | an agent-level error was reported (`lastAgentError`) | **continue** |
 | only the last *send* failed (`promptError`) | **resend** the last prompt — there is nothing in history to continue from |
 | running, blank, or nothing to act on | not rendered |
+| the composer holds a draft | not rendered — the message is about to go out, so a continuation is not offered next to it |
 
 Outcome reporting is inside the button (spinning / green check / red `!` + the
 message in its `title`). Nothing this plugin renders is inserted into the

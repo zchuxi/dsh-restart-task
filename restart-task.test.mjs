@@ -1207,7 +1207,12 @@ equal('send: it is made clickable again', hideDom.send.disabled, false)
 equal('send: it announces the continuation', hideDom.send.getAttribute('aria-label'), '继续上次任务')
 equal('send: its tooltip explains why', (hideDom.send.getAttribute('title') ?? '').includes('不会重复你的消息'), true)
 equal('send: the shipped arrow is swapped for the round arrow', hideDom.dom.styles()[0].textContent.includes("button[data-dyn-continue='1'] > svg"), true)
-equal('send: the round control steps aside while it carries the action', hideDom.dom.styles()[1].textContent.includes(':has(button[data-dyn-continue="1"])'), true)
+// The round control follows the product's own verdict: it is hidden whenever the
+// composer holds something to send, so a continuation is never offered next to a
+// message that is about to go out. One rule in the always-injected stylesheet
+// covers both cases (a typed message enables the primary; the takeover clears its
+// `disabled`), and it needs no keystroke bookkeeping of its own.
+equal('send: the round control steps aside while the composer has something to send', hideDom.dom.styles()[0].textContent.includes(":has(button[class*='_primary']:not([disabled])) .dyn-retry-round"), true)
 
 // Clicking it runs the composer control's own action: one busy guard, one outcome
 // flash, one double-click fence — and nothing reaches the product's submit path.
@@ -1367,7 +1372,10 @@ showRuntime.mountControl()
 showRuntime.flush()
 const conditionalRule = showDom.dom.styles()[1].textContent
 equal('dom: with hiding off the row rule is gone', conditionalRule.includes('data-dyn-restart-row'), false)
-equal('dom: the send takeover rule is on by default', conditionalRule.includes('data-dyn-continue'), true)
+// The round control's "step aside" rule is not gated on a setting: it follows the
+// product's primary control, and it lives in the always-injected stylesheet.
+equal('dom: the step-aside rule is always injected', showDom.dom.styles()[0].textContent.includes(":has(button[class*='_primary']:not([disabled]))"), true)
+equal('dom: and the conditional sheet only carries the row rule', conditionalRule.includes("_primary"), false)
 equal('dom: the rows are still tagged, so the rail still knows them', showDom.dom.document.querySelectorAll('[data-dyn-restart-row]').length, 2)
 equal('dom: the rail mark is still hidden in hide mode', showDom.mark7.getAttribute('data-dyn-continued'), 'hide')
 
