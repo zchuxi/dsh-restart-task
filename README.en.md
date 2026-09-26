@@ -265,12 +265,19 @@ Attribution has two sources, and it never guesses:
    already-open turn, so it is never a first input and never gains a round.
    Without a window yet, this rule is skipped and rule 1 still covers tier 2.
 
-The second source **accumulates**. The client only ever holds a *paged* window,
-and folding a completed round or loading another slice replaces it with a smaller
-one; a set recomputed from the current window alone would forget a round it had
-already recognised, and the rail mark would come back until the next slice
-arrived. So the set only grows while the transcript stays on one session, and it
-starts over when the transcript moves to another one.
+The second source **accumulates**, and a third makes it whole-session. The client
+only ever holds a *paged* window, and folding a completed round or loading another
+slice replaces it with a smaller one; a set recomputed from the current window
+alone would forget a round it had already recognised, and the rail mark would come
+back until the next slice arrived. So:
+
+- whatever either source says is remembered while the transcript stays on one
+  session, and starts over when the transcript moves to another one;
+- the **host half** registers a session projection (`restartTaskRounds`, the same
+  fold over the *whole* log rather than one page) whose value the projection seam
+  delivers to the client wholesale, and the browser half unions it in. That is what
+  attributes a round whose events are not loaded at all — the case a paged
+  transcript (`加载更早`) produces, where nothing on screen says whose round it is.
 
 Another producer's row — time context, `AGENTS.md`, skills, cron, subagent
 settlements, goal rounds — is never tagged and never hidden. The pass is
@@ -324,19 +331,28 @@ nav[data-dyn-continued-preview='1'] [class*='_previewPrompt'] { display: none !i
 Our own round's mark is tagged `hide`/`preview`; every other mark is left exactly
 as the product drew it. Because `hide` is `display: none` on the mark itself, the
 hover card has nothing left to attach to: that round's `第 N 轮` tooltip cannot
-appear at all. Every tag the pass owns is removed when the plugin unloads or the
-mode is set to `keep`.
+appear at all.
 
-Honest limits: it can only tag rounds the view has actually rendered (a round far
-outside the loaded window keeps its mark until it is scrolled into range, at
-which point the observer re-tags it); marks are virtualized, so only the marks in
-the rail's own scroll window are tagged at any moment; it matches marks through
-their accessible label because a mark carries no round attribute of its own; the
-rail's own DOM changed in 0.1.7 (a `button[data-index]` inside the marks
-container, with no per-mark position wrapper), which is what this pass reads; and
-`hide` hides the mark rather than removing it, so the rail's virtualization still
-knows the round — the remaining marks keep their own numbering, and the gap it
-left may stay.
+Hiding the mark is only half of it. The rail's virtualizer reserves that round's
+place — it sizes the marks container from its own measurements and never reflows
+it, and the product writes no per-mark geometry of its own — so a hidden mark left
+its slot behind as a hole in the middle of the rail. The pass therefore **compacts**
+what is on screen: it measures the pitch between the marks the view rendered,
+moves every mark after a hidden one up by one pitch, and shrinks the container by
+the number of hidden rounds. Both overrides are this plugin's own inline
+properties, recomputed on every pass and removed the moment nothing is hidden or
+the plugin unloads, so the rail returns to exactly what the product drew.
+
+Honest limits: it can only tag and compact rounds the view has actually rendered
+(a round far outside the loaded window is tagged as soon as it is scrolled into
+range); marks are virtualized, so only the marks in the rail's own scroll window
+are handled at any moment; it matches marks through their accessible label because
+a mark carries no round attribute of its own; the rail's own DOM changed in 0.1.7
+(a `button[data-index]` inside the marks container, with no per-mark position
+wrapper), which is what this pass reads; and the compaction is geometry the
+product recomputes on its own schedule — a re-render puts the marks back where the
+virtualizer wants them, and the next pass (a DOM mutation away) compacts them
+again.
 
 
 ## 8. Settings card

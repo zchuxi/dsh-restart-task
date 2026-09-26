@@ -97,6 +97,7 @@ const host = materialize(hostSource, '// #region auto-logic', '// #endregion aut
   'isUserStop',
   'resolveConfig',
   'liveConfig',
+  'foldRounds',
   'CONFIG_FIELDS',
   'DEFAULT_CONTINUE_TEXT',
   'BROKEN_REASONS',
@@ -379,6 +380,39 @@ equal('identity: the engines range agrees', manifest.engines.dsh, RUNTIME_RANGE)
 equal('identity: every supported tuple carries a prerelease branch', (RUNTIME_RANGE.match(/>=0\.\d+\.\d+-rc\.\d+/g) ?? []).length, 2)
 equal('identity: the range keeps the next major out', RUNTIME_RANGE.includes('<0.2.0-0'), true)
 
+// ------------------------------------------- the whole-session rounds fold
+// The rail lists every round of a session while a client only holds one page of
+// events, so a round of ours outside that page can only be attributed from the
+// host's fold over the whole log. That fold is asserted here against the same
+// rule and the same fixtures as the client's window walk, because the two must
+// agree: they describe one rule seen from two places.
+const windowFold = (events) => events.reduce(host.foldRounds, { rounds: [], turn: 0, spoken: true })
+const turnStart = (turn) => ({ type: 'turn/start', data: { turn } })
+const turnEnd = (kind) => ({ type: 'turn/end', data: { turn: 1, reason: { kind } } })
+const ourMessage = { type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '继续' }], source: { kind: hostModule.SOURCE_KIND, form: 'notice', summary: 'x' } } }
+const humanMessage = { type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } } }
+const injectedMessage = { type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: 'ctx' }], source: { kind: 'runtime-context' } } }
+
+equal('fold: an empty log has no rounds', windowFold([]).rounds.length, 0)
+equal('fold: the round a continuation opened is recorded', windowFold([turnStart(7), ourMessage, turnEnd('aborted')]).rounds.join(','), '7')
+equal('fold: two continuations record two rounds', windowFold([turnStart(7), ourMessage, turnEnd('aborted'), turnStart(8), ourMessage]).rounds.join(','), '7,8')
+equal('fold: a human round is not recorded', windowFold([turnStart(5), humanMessage, turnEnd('completed')]).rounds.length, 0)
+equal('fold: a steered message inside the human\'s round is not either', windowFold([turnStart(5), humanMessage, ourMessage, turnEnd('completed')]).rounds.length, 0)
+equal('fold: injected context ahead of ours keeps it out', windowFold([turnStart(5), injectedMessage, ourMessage]).rounds.length, 0)
+equal('fold: a message before any turn is inert', windowFold([ourMessage]).rounds.length, 0)
+equal('fold: a message after the turn closed is inert', windowFold([turnStart(3), humanMessage, turnEnd('error'), ourMessage]).rounds.length, 0)
+equal('fold: an unchanged event returns the same state reference', (() => {
+  const state = windowFold([turnStart(7), ourMessage])
+  return host.foldRounds(state, { type: 'assistant/message', data: {} }) === state
+})(), true)
+equal('fold: the same round is never recorded twice', windowFold([turnStart(7), ourMessage, turnStart(7), ourMessage]).rounds.join(','), '7')
+// The client's window walk and the host's whole-log fold must reach the same
+// answer for the same sequence — they are one rule stated twice.
+equal('fold: window and fold agree on a real sequence', (() => {
+  const sequence = [turnStart(5), humanMessage, injectedMessage, ourMessage, turnStart(7), ourMessage, turnEnd('aborted'), turnStart(8), ourMessage]
+  return windowFold(sequence).rounds.join(',') === client.ownWakingTurns(windowOf(sequence)).join(',')
+})(), true)
+
 // ------------------------------------------------- settings wiring / consistency
 /** Every settings key the host half declares. */
 function configKeys() {
@@ -535,7 +569,8 @@ equal('stop: an aborted wait delegates instead of vetoing it', hostSource.includ
  * so "waited, then retried" and "cancelled before the delay elapsed" are decisions
  * the harness can observe instead of guess.
  */
-function makeRuntime(config) {
+function makeRuntime(config, options) {
+  const settings = options === undefined || options === null ? {} : options
   const state = {
     injections: [],
     effects: [],
@@ -545,6 +580,10 @@ function makeRuntime(config) {
     steers: [],
     followups: [],
     timers: [],
+    /** Services this composition carries, for the `inject` gate below. */
+    services: Object.assign({ settings: true, sessionProjections: settings.sessionProjections !== false }, settings.services),
+    /** Every projection unit registered on this composition. */
+    projections: [],
   }
   const agents = new Map()
   const live = {}
@@ -562,6 +601,11 @@ function makeRuntime(config) {
     },
     inject(services, callback) {
       state.injections.push(services.join(','))
+      // Cordis only enters an `inject` child once every named service is there, so
+      // the stub does the same: a case that supplies no `sessionProjections` must
+      // exercise the same path a composition without that seam would.
+      const missing = services.filter((service) => service !== 'timer' && service !== 'agents' && state.services[service] !== true)
+      if (missing.length > 0) return
       callback(ctx)
     },
     timeout(callback) {
@@ -579,6 +623,12 @@ function makeRuntime(config) {
     settings: {
       configure(policy, fiber) {
         state.configured.push({ policy, fiber })
+        return () => {}
+      },
+    },
+    sessionProjections: {
+      register(definition) {
+        state.projections.push(definition)
         return () => {}
       },
     },
@@ -623,7 +673,20 @@ equal('host: the settings page policy names this plugin\'s fiber', runtime.state
 equal('host: the page policy opts out of an auto-generated page', runtime.state.configured[0]?.policy.auto, false)
 equal('host: the command is registered', runtime.state.commands.map((entry) => entry.name).join(','), 'continue-task')
 equal('host: every recovery seam is listened to', [...runtime.state.listeners.keys()].sort().join(','), 'agent/assistant-stream,agent/request-error,agent/turn-stopping,session/event')
-equal('host: the settings domain is optional, the agent is not', runtime.state.injections.join(' | '), 'settings | agents,timer')
+equal('host: the settings domain is optional, the agent is not', runtime.state.injections.join(' | '), 'settings | sessionProjections | agents,timer')
+// The rounds projection is how a client learns about a round whose events it has
+// not loaded; it must carry the client's key, publish the rounds alone, and be
+// able to re-seed from persisted state.
+equal('host: exactly one projection unit is registered', runtime.state.projections.length, 1)
+equal('host: it carries the key both halves spell', runtime.state.projections[0].key, 'restartTaskRounds')
+equal('host: its view is the rounds array', runtime.state.projections[0].wire.view({ rounds: [7, 8], turn: 8, spoken: true }).join(','), '7,8')
+equal('host: its schema accepts a persisted state', runtime.state.projections[0].stateSchema.safeParse({ rounds: [], turn: 0, spoken: true }).success, true)
+equal('host: and refuses a malformed one', runtime.state.projections[0].stateSchema.safeParse({ rounds: 'x' }).success, false)
+// A composition without the projection seam must still load the three tiers.
+const noProjection = makeRuntime({ maxRequestRetries: 0 }, { sessionProjections: false })
+hostModule.apply(noProjection.ctx, noProjection.live)
+equal('host: a composition without the projection seam still registers the command', noProjection.state.commands.length, 1)
+equal('host: and registers no projection there', noProjection.state.projections.length, 0)
 
 const agent = {
   id: 'session-1',
@@ -760,6 +823,9 @@ function stubDom() {
     if (selector === '[role="tooltip"][class*="_preview"]') return node.attributes.role === 'tooltip' && className(node).includes('_preview')
     if (selector === 'nav[class*="_frame"]') return node.tagName === 'nav' && className(node).includes('_frame')
     if (selector === '[class*="_marks"] button[data-index]') return node.tagName === 'button' && node.attributes['data-index'] !== undefined
+    if (selector === '[class*="_marks"]') return className(node).includes('_marks')
+    if (selector === '[data-dyn-rail-shifted]') return node.attributes['data-dyn-rail-shifted'] !== undefined
+    if (selector === '[data-dyn-rail-compacted]') return node.attributes['data-dyn-rail-compacted'] !== undefined
     if (selector.startsWith('button[aria-describedby=')) {
       const id = selector.slice(selector.indexOf('"') + 1, selector.lastIndexOf('"'))
       return node.tagName === 'button' && node.attributes['aria-describedby'] === id
@@ -775,6 +841,14 @@ function stubDom() {
       textContent: text,
       parent: null,
       children: [],
+      /** Geometry the rail's compaction reads, in stub-friendly form. */
+      offsetTop: 0,
+      offsetHeight: 0,
+      style: {
+        values: {},
+        setProperty(name, value) { this.values[name] = value },
+        removeProperty(name) { delete this.values[name] },
+      },
       getAttribute(name) { return name in node.attributes ? node.attributes[name] : null },
       setAttribute(name, value) { node.attributes[name] = value },
       removeAttribute(name) { delete node.attributes[name] },
@@ -830,6 +904,8 @@ function stubDom() {
 function makeClientRuntime(dom, slotValues, initialWindow) {
   const state = { registrations: [], components: new Map(), observers: 0, timers: [] }
   const scopeListeners = new Set()
+  const projectionListeners = new Set()
+  const projectionRoundsValue = { current: undefined }
   let currentWindow = initialWindow
   let observerCallback = null
   globalThis.document = dom.document
@@ -858,7 +934,17 @@ function makeClientRuntime(dom, slotValues, initialWindow) {
       if (name !== 'sessions') return undefined
       return {
         binding: () => ({
-          session: { command: async () => ({ ok: true, value: { matched: true } }), prompt: async () => ({ ok: true }) },
+          session: {
+            command: async () => ({ ok: true, value: { matched: true } }),
+            prompt: async () => ({ ok: true }),
+            // The host's whole-session view: what the projection seam delivers.
+            projections: {
+              faceOf: (key) => ({
+                getSnapshot: () => (key === 'restartTaskRounds' ? projectionRoundsValue.current : undefined),
+                subscribe: (listener) => { projectionListeners.add(listener); return () => { projectionListeners.delete(listener) } },
+              }),
+            },
+          },
           eventSource: { subscribe: () => () => {}, getSnapshot: () => currentWindow },
         }),
       }
@@ -900,6 +986,13 @@ function makeClientRuntime(dom, slotValues, initialWindow) {
     },
     /** Replace the session window, the way folding or paging does. */
     setWindow(value) { currentWindow = value },
+    /** Publish a projection value, the way the host's change feed does. */
+    setProjectionRounds(value) {
+      projectionRoundsValue.current = value
+      projectionListeners.forEach((listener) => {
+        try { listener() } catch (error) { void error }
+      })
+    },
     /** Ask the pass to sweep again, the way a DOM mutation would. */
     sweep() { if (observerCallback !== null) observerCallback() },
     /** Mount the composer control once, which is what publishes the window. */
@@ -935,9 +1028,18 @@ function transcriptDom() {
   const mark7 = dom.make('button', { class: 'abc_mark', 'data-index': '6', 'aria-label': '跳转到第 7 轮' })
   const mark6 = dom.make('button', { class: 'abc_mark', 'data-index': '5', 'aria-label': '跳转到第 6 轮' })
   const mark5 = dom.make('button', { class: 'abc_mark', 'data-index': '4', 'aria-label': '跳转到第 5 轮' })
+  // What the rail's virtualizer leaves on screen: a column of 10px marks on a 10px
+  // pitch, and a container sized to hold them all.
   marks.append(mark7)
   marks.append(mark6)
   marks.append(mark5)
+  mark7.offsetTop = 0
+  mark7.offsetHeight = 10
+  mark6.offsetTop = 10
+  mark6.offsetHeight = 10
+  mark5.offsetTop = 20
+  mark5.offsetHeight = 10
+  marks.offsetHeight = 30
   nav.append(marks)
   // The composer: the shipped primary control (empty draft ⇒ disabled) and this
   // plugin's own round control, both inside the composer card.
@@ -1021,8 +1123,41 @@ equal('dom: the plugin round\'s rail mark is hidden', hideDom.mark7.getAttribute
 // plugin's to touch, and neither is a foreign round's.
 equal('dom: the human round\'s mark stays', hideDom.mark5.getAttribute('data-dyn-continued'), null)
 equal('dom: a foreign round\'s mark stays', hideDom.mark6.getAttribute('data-dyn-continued'), null)
+// Hiding the mark is not enough: the rail's virtualizer reserved that round's
+// slot, so `hide` alone left a hole in the middle of the rail. The pass measures
+// the marks on screen and closes it, and every mark after the hidden one moves up.
+equal('dom: the marks after the hidden one move up by one pitch', hideDom.mark6.style.values.transform, 'translateY(-10px)')
+equal('dom: and so does the next', hideDom.mark5.style.values.transform, 'translateY(-10px)')
+equal('dom: the hidden mark itself is not shifted', hideDom.mark7.attributes['data-dyn-rail-shifted'], undefined)
+equal('dom: the container shrinks by the hidden slot', hideDom.dom.document.querySelector('[class*="_marks"]').style.values.height, '20px')
 
-// ---- folding and paging must not take a round back ---------------------------
+// ---- a round whose events are not loaded at all ------------------------------
+// This is the reported case: the session is paged (`加载更早`) and the round's own
+// events — the message that opened it, its `turn/start` — are not in the client's
+// window, so nothing on screen says whose round it is. The host's fold over the
+// whole log does, and the projection seam delivers it whole.
+const remoteDom = transcriptDom()
+const pagedWindow = windowOf([start(9, 900), human('later'), step()])
+const remoteRuntime = makeClientRuntime(remoteDom.dom, { hideContinueRow: true, continuedRailMarks: 'hide', sendBecomesContinue: false }, pagedWindow)
+clientBundleExports.apply(remoteRuntime.ctx)
+remoteRuntime.flush()
+remoteRuntime.mountControl()
+remoteRuntime.flush()
+equal('projection: a paged-away round is not attributable from the window', remoteDom.mark7.getAttribute('data-dyn-continued'), null)
+// The host reports the rounds it opened over the whole log, round 7 among them.
+remoteRuntime.setProjectionRounds([7])
+remoteRuntime.sweep()
+remoteRuntime.flush()
+equal('projection: the whole-log rounds reach the rail', remoteDom.mark7.getAttribute('data-dyn-continued'), 'hide')
+equal('projection: and their slot is closed like any other', remoteDom.mark6.style.values.transform, 'translateY(-10px)')
+equal('projection: the container shrinks for that round too', remoteDom.dom.document.querySelector('[class*="_marks"]').style.values.height, '20px')
+// A later, narrower report cannot take the round back: what either source ever
+// said stays true while the transcript is on this session.
+remoteRuntime.setProjectionRounds([])
+remoteRuntime.sweep()
+remoteRuntime.flush()
+equal('projection: a narrower report does not retract it', remoteDom.mark7.getAttribute('data-dyn-continued'), 'hide')
+
 // The client only ever holds a *paged* window, and folding a completed round or
 // loading another slice replaces it. A rule recomputed from the current window
 // alone forgot a round it had already recognised, so the mark came back until the
@@ -1137,6 +1272,10 @@ previewRuntime.flush()
 previewRuntime.mountControl()
 previewRuntime.flush()
 equal('dom: preview keeps the mark', previewDom.mark7.getAttribute('data-dyn-continued'), 'preview')
+// `preview` keeps the mark on screen, so nothing is compacted: the rail keeps the
+// geometry the product gave it.
+equal('dom: preview leaves the marks where they are', previewDom.mark6.style.values.transform, undefined)
+equal('dom: and the container keeps its own height', previewDom.dom.document.querySelector('[class*="_marks"]').style.values.height, undefined)
 // The hover card is a sibling of the marks, so "this preview belongs to a
 // continued round" is carried on the rail itself.
 const tooltip = previewDom.dom.make('div', { role: 'tooltip', class: 'abc_preview', id: 'tp' })

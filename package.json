@@ -1,6 +1,6 @@
 {
   "name": "dsh-restart-task",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "DSH web plugin: a three-tier recovery policy for broken turns — silent in-turn retry, in-turn keep-alive for truncated output, and an opt-in continuation turn — with a round control in the composer, the shipped send button taking over as \"continue\", and a settings card.",
   "type": "module",
   "main": "lib/index.js",
@@ -68,6 +68,7 @@
     }
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.4"
+    "@deepseek-ai/schemastery": "^3.18.4",
+    "zod": "^4.6.5"
   }
 }
