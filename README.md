@@ -1,5 +1,5 @@
 ---
-description: "DSH Web 插件：把被打断的回合救回来 —— 同一步内静默重试、输出被截断时同轮续写、可选的新一轮继续；输入框为空时发送键本身会变成「继续」。"
+description: "DSH Web 插件：把被打断的回合救回来 —— 把失败请求的可见重试预算调宽（由产品自带的重试执行器渲染成实时倒计时）、输出被截断时同轮续写、可选的新一轮继续；输入框为空时发送键本身会变成「继续」。"
 kind: "package-reference"
 ---
 
@@ -13,22 +13,24 @@ DeepSeek Harness **Web profile 插件**：输入框里的一个回合恢复控�
 
 | 层级 | 何时生效 | 对话记录里多出什么 |
 | --- | --- | --- |
-| 1. 同一步内重试 | 模型请求失败 | **什么都不多** —— 连一行都没有 |
+| 1. 调宽可见重试预算 | 模型请求失败 | 一条产品自带的重试行（实时倒计时，可停） |
 | 2. 同轮续写（keep-alive） | 回复撞上输出上限 | 不新开回合；续写那一行被隐藏 |
 | 3. 新开一轮继续 | 回合已经以失败收场 | 一个回合 + 一条折叠记录（默认隐藏） |
 
 ## 0. 适用版本
 
-针对 **DSH 0.1.7-rc.1 及其后的 0.1.x** 编写，并且在 loader 会真正校验的地方写明了这一点：`peerDependencies["@deepseek-ai/dsh"]` 为 `>=0.1.7-rc.1 <0.1.8-0 || >=0.1.8-rc.1 <0.2.0-0`（强制字段），声明性的 `engines.dsh` 与之保持一致，插件自带的 `@deepseek-ai/schemastery` 为 `^3.18.4`（第一个支持 `.volatile()` schema 的版本，下面的配置模型依赖它）。
+针对 **DSH 0.1.7-rc.1 及其后的 0.1.x，以及 0.2.x** 编写，并且在 loader 会真正校验的地方写明了这一点：`peerDependencies["@deepseek-ai/dsh"]` 为 `>=0.1.7-rc.1 <0.1.8-0 || >=0.1.8-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0`（强制字段），声明性的 `engines.dsh` 与之保持一致，插件自带的 `@deepseek-ai/schemastery` 为 `^3.18.4`（第一个支持 `.volatile()` schema 的版本，下面的配置模型依赖它）。
 
-> 范围为什么要写成两段：node-semver 只有当范围里**某个比较符**与该版本的 `major.minor.patch` 元组完全一致、且自身带预发布标签时，才放行预发布版本。写成看着更宽的 `>=0.1.7-rc.1` 时，`0.1.8-rc.1` 这类下一条补丁线的 rc 会被**静默排除**，用户只会撞上 ERESOLVE（或 loader 直接跳过这个 bundle）。所以每个受支持的元组各占一段，并用 `<0.2.0-0` 把下一个大版本挡在外面 —— 0.2.0 上能否工作没有验证过，宁可让 loader 明确跳过。
+> 范围为什么要分段：node-semver 只有当范围里**某个比较符**与该版本的 `major.minor.patch` 元组完全一致、且自身带预发布标签时，才放行预发布版本。写成看着更宽的 `>=0.1.7-rc.1` 时，`0.1.8-rc.1`、`0.2.0-rc.1` 这类下一条线的 rc 会被**静默排除**，用户只会撞上 ERESOLVE（或 loader 直接跳过这个 bundle）。所以每个受支持的元组各占一段：`>=0.2.0-rc.1` 才能让 `0.2.0-rc.1`（npm 上的 `next` 标签）这个预发布自身通过，`<0.3.0-0` 把下一个次要版本挡在外面。DSH 自 0.1.7 起就在安装与启动时按这个字段校验（`evaluatePluginCompatibility`，`semver.satisfies(..., { includePrerelease: true })`，只看 `peerDependencies`，不看 `engines`），装错版本会给出明确提示而不是运行时崩溃。
 
 版本之所以关键，是因为本插件赖以生存的两条接缝都变了：
 
 - **设置不再是插件自己注册的命名空间。** 0.1.7 里 `settings.register(namespace, schema, { applies: 'live' })` 与 `settings.get(namespace)` 已被移除且没有继任者：插件的 `Config` 本身就是它的设置表单，而表单用 **profile 条目 id** 来寻址。见 §8。
 - **插件消息不再是 `{ kind: 'plugin', plugin }` 包装。** 会话格式 v4 要求「生产者自有」的 `source.kind`；本插件用自己的包名。见 §4。
 
-在更旧的运行时上，bundle 会在启动时被 loader 按兼容性规则直接跳过（并给出 `dsh plugin allow-version` 这条明确的豁免途径）—— 这是诚实的结局：上面两条接缝在那里并不存在。
+在更旧的运行时上，bundle 会在启动时被 loader 按兼容性规则直接跳过（并给出 `dsh plugin allow-version` 这条明确的豁免途径）—— 这是诚实的结局：上面两条接缝在那里并不存在。0.2.0-rc.1 仍沿用同样的接缝（`agent/request-error` 瀑布、`retryPolicy`、`agent/turn-stopping`、会话投影、设置表单与 composer slot 都未变），所以放开兼容范围只需要改清单。
+
+**1.5.0 针对 0.2.0-rc.2 做的核对与补齐。** 上面每一条接缝都按运行中的 0.2.0-rc.2 实例重新核对过：`agent/request-error` 的 `retryPolicy` 仍是 `ResolvedRetryPolicy`（`mode` / `maxRetries` / `retryableCodes` / 扁平退避块），`agent/turn-stopping` 仍是 awaited 的 serial 事件、`agent.steer()` 仍把消息投进 `next-step`，`agent.followup()` 仍开新回合，`settings.configure(presentation, fiber)` 与「表单按 `entry.options.id` 寻址」的模型未变，`conversation.input.right` 与 `plugins.bundle.config` 两个 slot 也仍在原位。顺带补上了两处 0.2 才暴露出来的问题：`max-tokens` 这个**回合级**结束原因（见 §7），以及同轮续写可能把指令塞进一个人已经停掉的回合。
 
 ## 1. 手动控制
 
@@ -37,6 +39,7 @@ DeepSeek Harness **Web profile 插件**：输入框里的一个回合恢复控�
 | 会话状态 | 控件行为 |
 | --- | --- |
 | 上一轮以 `error` / `aborted` / `interrupted` 结束 | **继续** —— 请宿主从中断处接着做 |
+| 上一轮回复撞到输出上限、收尾那步确实被截断（`max-tokens`） | **继续** —— 接着把没写完的部分写完 |
 | 上报了 agent 级错误（`lastAgentError`） | **继续** |
 | 只有最后一次**发送**失败（`promptError`） | **重发**上一条输入 —— 历史里没有可接续的内容 |
 | 正在运行、空白会话、无事可做 | 不渲染 |
@@ -65,13 +68,15 @@ DeepSeek Harness **Web profile 插件**：输入框里的一个回合恢复控�
 
 已知边界：它读的是产品渲染而不是声明式 API，若某版本改了主按钮的 class 或去掉 `data-composer-card`，接管会静默停止（不会报错，圆形控件照常工作）；在产品因自身原因禁用发送键的少数状态（有上传在跑、等待授权）下，接管同样会生效；接管期间产品自带 tooltip 仍显示「发送消息」（可访问名与 `title` 是本插件的）；**Enter 键刻意没动** —— 产品把它注册为只读固定动作，劫持它会让「空草稿 + 回车」变成不请自来的开工。
 
-## 2. 第 1 层 —— 同一步内重试（默认开，不可见）
+## 2. 第 1 层 —— 调宽可见重试预算（默认开）
 
-`agent/request-error` 是**瀑布（waterfall）**：监听器返回 `{ kind: 'retry' }` 且不调用 `next()`，就会让循环**就地重跑同一步**。本插件先按自己的退避等待（`retryBaseDelayMs × 2^attempt`，上限 60s），然后认领这次恢复，最多 `maxRequestRetries` 次 —— 或打开 `retryForever` 无限重试。
+`agent/request-error` 是**瀑布（waterfall）**：本插件用 `prepend` 把自己挂在产品自带的 `dsh-llm-retry` **之前**，在失败的一步上就地把 `payload.retryPolicy` 换成一份更宽的策略，然后 `next()` 委派 —— 由重试执行器读到这份更宽的策略并**自己**完成重试。因此每次重试都是产品渲染的那条实时倒计时行（用户看得见、能取消），而持久化的 `llm/retry` 事件始终由持有其不变量的代码来写，本插件从不自己伪造。
 
-过程中不向会话追加任何东西 —— 没有指令消息、没有额外回合、没有重试行 —— 所以「失败后成功」的请求在对话记录里和一次成功完全一样。确定性客户端错误（4xx，429 除外）在任何预算被考虑**之前**就交给下游，因此「无限重试」也不会把错误的 API Key 变成死循环。每步的计数器在 `turn/end` 清空。
+普通模式下换上的策略是 `{ mode: 'normal', maxRetries: maxRequestRetries, retryableCodes, …退避 }`：`maxRetries` 取自本插件的预算（默认 30），退避基数取自 `retryBaseDelayMs`（上限 60s、20% 抖动），而 `retryableCodes` **沿用该 provider 自己解析出的那份**（provider 没有则回落到产品默认集）—— 也就是「重试预算与节奏由本插件定，什么错误值得重试仍由 provider 定」。确定性客户端错误（如 401、配额耗尽）不在该集合里，因此仍然快速失败，调宽预算不会把错误的 API Key 变成死循环。
 
-产品自带的 `dsh-llm-retry` 也监听 `agent/request-error`，而 `dsh-base` 把它挂在本插件**之前**，所以它在更上游：先用自己的策略（普通模式 5 次、自己的退避），耗尽后才用 `next()` 委派，此时本插件的预算才开始。两套预算因此是**相加**的 —— 若希望更早放弃，请调低产品那一侧，或关掉本插件这一侧。
+打开 `retryForever` 换上的是 `{ mode: 'always', …退避 }`：执行器会对**任何**失败无限重试，没有终端错误的守卫 —— 所以它默认关闭，需要无人值守长任务时才开。
+
+只有**确实路由到了某份 retry 策略**的一步才会被调宽：一个请求若连 adapter 都没到达（`payload.retryPolicy` 为空），执行器本就会拒绝，硬塞一份策略也救不了它，于是原样委派，保留执行器自己的拒绝路径。因为重试完全交给产品的执行器来做与计数，本插件不再自己等待、不再维护每步计数器。
 
 ## 3. 第 2 层 —— 同轮续写（不新开回合）
 
@@ -181,9 +186,9 @@ nav[data-dyn-continued-preview='1'] [class*='_previewPrompt'] { display: none !i
 
 | 字段 | 默认 | 含义 |
 | --- | --- | --- |
-| `retryFailedRequests` | `true` | 在同一个 step 内重试失败的请求（不可见） |
-| `maxRequestRetries` | `3` | 同轮重试次数上限（`0` = 不重试） |
-| `retryForever` | `false` | 忽略预算，重试到成功或中止 |
+| `retryFailedRequests` | `true` | 请求失败时放大产品的**可见**重试预算（可看到倒计时） |
+| `maxRequestRetries` | `30` | 可见重试次数上限（`0` = 不重试） |
+| `retryForever` | `false` | 忽略预算，重试到成功或中止（切到产品的 `always` 模式，无终端错误守卫） |
 | `retryBaseDelayMs` | `2000` | 退避基数：2s、4s、8s… 上限 60s |
 | `keepAliveOnMaxTokens` | `true` | 让被截断的回合保持开启，在回合内续写 |
 | `maxTurnContinues` | `5` | 单个回合内允许续写几次（`0` = 不限） |
@@ -193,12 +198,25 @@ nav[data-dyn-continued-preview='1'] [class*='_previewPrompt'] { display: none !i
 | `onAborted` | `true` | *系统*取消（父 agent / hook）之后继续；用户主动停止永不继续 |
 | `onError` | `true` | 模型请求失败之后继续 |
 | `onInterrupted` | `true` | 崩溃遗留孤儿回合之后继续 |
+| `onMaxTokens` | `true` | 回复撞到输出上限、没写完之后继续（只在本轮最后一步确实被截断时触发） |
 | `sendBecomesContinue` | `true` | 输入框为空时，把继续交给产品发送键（见 §1.1） |
 | `hideContinueRow` | `true` | 在 Chat 里隐藏本插件自己的折叠行 |
 | `continuedRailMarks` | `hide` | 轨道如何呈现本插件继续出的轮次（`hide` / `preview` / `keep`） |
 | `continueText` | （内置） | 发给模型的继续指令 |
 
-`autoContinue` 关闭时，`onAborted` / `onError` / `onInterrupted` 会被禁用，因为它们只描述那一层何时触发。
+`autoContinue` 关闭时，`onAborted` / `onError` / `onInterrupted` / `onMaxTokens` 会被禁用，因为它们只描述那一层何时触发。
+
+> `onMaxTokens` 为什么需要单独的判定：DSH 只要**任意一步**撞到输出上限，就把该回合的 `turn/end` 原因钉成 `max-tokens`，并且后续步骤无法把它降级。所以「被截断后同轮续写、并且正常写完」的回合，和「真的没写完」的回合，带的是同一个原因。插件用**收尾那一步自己的 finish 原因**区分两者（宿主侧来自 `agent/assistant-stream`，浏览器侧从 `assistant/message` 自带的 stream 记录里读回）：只有收尾步骤也停在 `max-tokens` 时才算未完成。这条判定同时保证第 2 层和第 3 层不会对同一次中断重复出手。
+
+> 卡片为什么会说「宿主没有接受这次写入」：`configForms` 对**被拒绝**的写入是 resolve `false`，不是 reject（`ConfigFormController.mutate` 在 `!response.ok` 时返回 `false`，`enqueue` 在内存持久化模式下直接 resolve `false`）。早先的版本只挂成功回调，于是被拒绝的写入也会显示「已生效」—— 编辑器里留着用户自己输入的值，看上去一切正常。现在每个字段的写入、单字段恢复默认、以及「全部恢复默认」都会读这个布尔值，只有全部落地才报成功。数值输入框同时带上了宿主 schema 的 `.max()` 上限，让这类拒绝根本不会发生；回归测试会把卡片里的上限表和宿主 schema 逐项对比。
+
+### 1.2 只有一个 composer 时发送键才接管
+
+发送键接管这件事，靠的是两个「全局」事实：本插件的待继续状态是**插件级**的一份（由最后渲染的那个会话的控件发布），而 `primaryButtons()` 会扫过**整个文档**的 composer 卡片。页面上只有一个 composer 时，这两个事实指向同一个东西；出现第二个时就不成立了 —— 最后发布的那个会话的状态会去装扮另一个会话的发送键，点击也无法再归因到某个会话。
+
+所以 `soleComposer()` 是这条路径的前置条件：**检测到多于一张 `[data-composer-card]` 就整体退让**，把已经接管的按钮全部交还，不装扮任何一张。同一次点击的解析也从「文档里第一个 `.dyn-retry-round`」改成「**被点击按钮自己那张卡片里**的控件」（`controlInCard(cardOf(button))`），fallback 分支在多卡片时同样拒绝出手。
+
+产品每个会话只渲染一张卡片（`renderSlot('conversation.composer.bar', …)` —— 空会话的 hero 外观是同一个渲染的 `variant`，不是第二个实例），布局又通过 keyed 的 `main` slot 挂载中央面板，所以「一张卡片」是当前常态，这条守卫是为它将来不成立的那天准备的。无论如何，**退让只让功能不生效，绝不让它继续错任务**；圆形控件按自己的 slot 作用域工作，不受这条守卫影响。
 
 ### 值是怎么进出的（0.1.7 的配置模型）
 
@@ -228,14 +246,14 @@ nav[data-dyn-continued-preview='1'] [class*='_previewPrompt'] { display: none !i
 有三处区域被直接断言 —— `lib/index.js` 的 `auto-logic`、`lib/client.js` 的 `core-logic`，以及宿主模块自身的导出 —— 所以出厂代码跑的就是被测的决策：
 
 ```sh
-node dsh-restart-task/restart-task.test.mjs   # 305 条断言，两半都覆盖
+node dsh-restart-task/restart-task.test.mjs   # 426 条断言，两半都覆盖
 ```
 
 测试分四层，因为移植到 0.1.7 时坏过三种方式，而行/轨道的呈现只能看它对文档的实际效果：
 
-1. **规则** —— 重试预算（确定性 4xx、429、倍增、60s 上限、不限次）、保活门槛（只有 `max-tokens`、每轮上限）、回合级门槛（坏掉的原因、逐原因开关、连击上限）、对话记录读取（只认人类提问、坏掉与干净的结束）、开轮识别、控件模式选择、头部摘要文案。
+1. **规则** —— 重试预算调宽（关时不调宽、普通模式取插件预算并沿用 provider 的 `retryableCodes`、`retryForever` 换 `always`、退避基数与 60s 上限）、保活门槛（只有 `max-tokens`、每轮上限）、回合级门槛（坏掉的原因、逐原因开关、连击上限）、对话记录读取（只认人类提问、坏掉与干净的结束）、开轮识别、控件模式选择、头部摘要文案。
 2. **接线** —— 所有身份字符串一致（patch 条目 id ↔ 宿主 `ENTRY_ID` ↔ 客户端 `ENTRY_ID`，包名 ↔ bundle 席位键 ↔ 生产者 kind），每个 `Config` 字段都是 volatile 且每个被服务的字段都由卡片渲染，已退休的设置接缝、席位、选择器全部消失，行隐藏规则以本插件自己的标记为键，两个样式标签都写明归属。
-3. **宿主行为** —— 真正 import `lib/index.js`，并用桩 Cordis 上下文驱动：命令只发一条生产者来源的消息；401 被委派而 500 等待后原地重试；等待中被停止则委派；被截断的一步在回合内 steer，而完成的一步不会；回合级继续只在开启时发生，且永不发生在用户停止之后，也永不越过连击上限。
+3. **宿主行为** —— 真正 import `lib/index.js`，并用桩 Cordis 上下文驱动：命令只发一条生产者来源的消息；失败的一步就地把 `payload.retryPolicy` 换成更宽的策略后委派（没有路由到策略的一步原样委派、被停止的一步原样委派）；被截断的一步在回合内 steer，而完成的一步不会；回合级继续只在开启时发生，且永不发生在用户停止之后，也永不越过连击上限。
 4. **对话记录、轨道与发送键（桩 DOM）** —— 加载浏览器半边并应用到一份假 document 上：里面有一个本插件开的轮次、一个人类开的轮次（其中带着本插件的同轮 steer）、别的生产者的上下文行与触发通知，以及一个主按钮初始为禁用的输入框。结果是：本插件自己的行被打标而别人的没有；steer 行只靠来源标签就能认出，而触发通知需要会话窗口；本插件那一轮的轨道标记在 `hide` 模式下被隐藏、`preview` 模式下被标记，而人类那一轮与外部轮次的标记永不被动；发送键被接管、被点击（点击在产品看到之前就被截停，改由圆形控件执行）、在输入框有内容时不被接管、开关关闭后被交还；窗口缩小时（折叠/分页）不会把已经认出的轮次收回。事件夹具抄自真实的 `session.v4.jsonl`，包括决定归属的 `turn/start` → 消息顺序。
 
 ## 延伸阅读
@@ -251,7 +269,7 @@ node dsh-restart-task/restart-task.test.mjs   # 305 条断言，两半都覆盖
 
 分层的模型可见性：
 
-- **第 1 层**不可见：被重试的请求用同一段持久历史重建同一个 step，没有任何重试事件、延迟或提供方错误到达模型。
+- **第 1 层**对模型不可见：本插件只放大产品的重试预算，重试由产品的 `dsh-llm-retry` 执行、用同一段持久历史重建同一个 step，模型读到的仍是干净前缀。可见的 `llm/retry` 倒计时是**给人看的** UI，不进模型请求。
 - **第 2 层**多出一条 `user/message`，其 `source.kind` 是本插件名：模型读到指令，人类读到一条折叠记录（默认隐藏）。
 - **第 3 层**是一个新回合，唯一输入就是这条生产者来源的消息。因此模型看到的是一句「接着做」的指令，绝不会是用户原话的第二份拷贝。
 
@@ -283,6 +301,6 @@ bundle 通过其 `dsh.bundle.patch` 清单字段加入 `dsh.profile.bundles`；�
 
 > 本地 checkout 请放在**不含空格**的路径下。`dsh plugin` 会把参数经 shell 转发，含空格的路径会被拆成若干个错误依赖。
 
-**环境要求。** DSH `>=0.1.7-rc.1 <0.1.8-0 || >=0.1.8-rc.1 <0.2.0-0`（声明为会被真正校验的 `peerDependencies["@deepseek-ai/dsh"]` 范围，因此更旧的运行时会在启动时按 loader 的兼容性提示跳过 bundle，而不是在内部某处出错）、Node `>=24`，以及一个运行时依赖 —— `@deepseek-ai/schemastery ^3.18.4`（第一个 schema 能 `.volatile()` 的版本）。开发用 checkout 请用 `npm install --legacy-peer-deps` 安装：`@deepseek-ai/dsh` 这个 peer 是插件运行所在的宿主，不该作为构建依赖被拖下来。
+**环境要求。** DSH `>=0.1.7-rc.1 <0.1.8-0 || >=0.1.8-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0`（声明为会被真正校验的 `peerDependencies["@deepseek-ai/dsh"]` 范围，因此范围之外的运行时会在启动时按 loader 的兼容性提示跳过 bundle，而不是在内部某处出错）、Node `>=24`，以及一个运行时依赖 —— `@deepseek-ai/schemastery ^3.18.4`（第一个 schema 能 `.volatile()` 的版本）。开发用 checkout 请用 `npm install --legacy-peer-deps` 安装：`@deepseek-ai/dsh` 这个 peer 是插件运行所在的宿主，不该作为构建依赖被拖下来。
 
 **浏览器半边是热重载的**：`dsh-client-hmr` 会轮询每个客户端 bundle 的修改时间，把重建后的版本换进正在运行的页面，所以编辑 `lib/client.js` 保存即生效。**宿主半边需要重启 profile** —— `agent/turn-stopping` 和新的设置键都要等 `lib/index.js` 重新加载后才存在。

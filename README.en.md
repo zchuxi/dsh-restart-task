@@ -1,5 +1,5 @@
 ---
-description: "A DSH web plugin that recovers broken turns: silent in-turn retry, in-turn keep-alive for truncated output, an opt-in continuation turn, and a composer whose send button becomes \"continue\" when the composer is empty."
+description: "A DSH web plugin that recovers broken turns: widening the provider's visible retry budget for failed requests, in-turn keep-alive for truncated output, an opt-in continuation turn, and a composer whose send button becomes \"continue\" when the composer is empty."
 kind: "package-reference"
 ---
 
@@ -10,30 +10,34 @@ English | [中文](README.md)
 A DeepSeek Harness **web profile plugin**: a round control in the composer, a
 three-tier recovery policy behind it, and a settings card for the whole thing.
 
-The design rule everything follows: **a recovered request should leave no trace.**
+The design rule everything follows: **recovery should be quiet, and only as visible as it has to be.**
 
 | tier | when it applies | what the transcript gains |
 | --- | --- | --- |
-| 1. in-turn retry | a model request failed | **nothing** — not even a row |
+| 1. widen the visible retry budget | a model request failed | the product's own live retry countdown (owned by `dsh-llm-retry`) |
 | 2. in-turn keep-alive | the reply hit the output ceiling | no new round; the continuation row is hidden |
 | 3. new continuation turn | the turn already ended broken | one round + one collapsed row (hidden by default) |
 
 ## 0. Which DSH this is for
 
-Written against **DSH 0.1.7-rc.1 and the 0.1.x line after it**, and it says so where
-the loader looks: `peerDependencies["@deepseek-ai/dsh"]` is
-`>=0.1.7-rc.1 <0.1.8-0 || >=0.1.8-rc.1 <0.2.0-0` (the enforced field), the
-declarative `engines.dsh` agrees, and the plugin's `@deepseek-ai/schemastery` is
-`^3.18.4` — the first release with `.volatile()` schemas, which the settings model
-below is built on.
+Written against **DSH 0.1.7-rc.1, the 0.1.x line after it, and the 0.2.x line**, and
+it says so where the loader looks: `peerDependencies["@deepseek-ai/dsh"]` is
+`>=0.1.7-rc.1 <0.1.8-0 || >=0.1.8-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0` (the
+enforced field), the declarative `engines.dsh` agrees, and the plugin's
+`@deepseek-ai/schemastery` is `^3.18.4` — the first release with `.volatile()`
+schemas, which the settings model below is built on.
 
-> Why the range has two branches: node-semver only lets a prerelease satisfy a
+> Why the range has branches: node-semver only lets a prerelease satisfy a
 > range when some comparator **on that version's `major.minor.patch` tuple** carries
 > a prerelease tag of its own. A range that looks broader, `>=0.1.7-rc.1`, silently
-> excludes the next patch line's release candidates (`0.1.8-rc.1`) — the user meets
-> an `ERESOLVE`, or the loader skips the bundle. So each supported tuple gets its
-> own branch, and `<0.2.0-0` keeps the next major out: 0.2.0 is unverified here, and
-> an explicit skip is better than an unverified load.
+> excludes the next lines' release candidates (`0.1.8-rc.1`, `0.2.0-rc.1`) — the user
+> meets an `ERESOLVE`, or the loader skips the bundle. So each supported tuple gets
+> its own branch: `>=0.2.0-rc.1` is what lets the `0.2.0-rc.1` prerelease (npm's
+> `next` tag) itself through, and `<0.3.0-0` keeps the next minor out. Since 0.1.7
+> the host enforces exactly this field — `evaluatePluginCompatibility` runs
+> `semver.satisfies(runtime, range, { includePrerelease: true })` over
+> `peerDependencies` (it never reads `engines`) at install and launch — so a
+> mismatch is a clear message, not a runtime crash.
 
 The version matters because the two seams this plugin lives on both changed:
 
@@ -47,7 +51,22 @@ The version matters because the two seams this plugin lives on both changed:
 
 On an older runtime the bundle is skipped up front with the loader's own
 compatibility line (and `dsh plugin allow-version` is the documented escape hatch),
-which is the honest outcome: the two seams above do not exist there.
+which is the honest outcome: the two seams above do not exist there. 0.2.0-rc.1 keeps
+those same seams (the `agent/request-error` waterfall, `retryPolicy`,
+`agent/turn-stopping`, the session projection, the settings form and the composer
+slot are all unchanged), so admitting the 0.2 train is a manifest-only change.
+
+**What 1.5.0 verified and completed against 0.2.0-rc.2.** Every seam above was
+re-checked against a running 0.2.0-rc.2 instance: `agent/request-error` still hands
+over a `ResolvedRetryPolicy` (`mode` / `maxRetries` / `retryableCodes` / the flat
+backoff block), `agent/turn-stopping` is still an awaited serial event and
+`agent.steer()` still posts into `next-step`, `agent.followup()` still opens a new
+turn, `settings.configure(presentation, fiber)` and the "a form is addressed by
+`entry.options.id`" model are unchanged, and both occupied slots
+(`conversation.input.right`, `plugins.bundle.config`) are still where the client
+half puts them. It also closed two gaps that only 0.2 exposes: the **turn-level**
+`max-tokens` end reason (see §7), and an in-turn continue that could push an
+instruction into a turn the human had already stopped.
 
 
 ## 1. The manual control
@@ -58,6 +77,7 @@ cluster, immediately left of the shipped submit button.
 | session state | control does |
 | --- | --- |
 | last turn ended `error` / `aborted` / `interrupted` | **continue** — asks the host to carry on from the breakpoint |
+| last turn's answer hit the output ceiling and its closing step really was truncated (`max-tokens`) | **continue** — finishes the part that never got written |
 | an agent-level error was reported (`lastAgentError`) | **continue** |
 | only the last *send* failed (`promptError`) | **resend** the last prompt — there is nothing in history to continue from |
 | running, blank, or nothing to act on | not rendered |
@@ -129,20 +149,37 @@ this plugin's); and the **Enter key is left alone** — the fixed send action is
 read-only in the product and hijacking it would make an empty-draft Enter start
 unrequested work.
 
-## 2. Tier 1 — in-turn retry (default on, invisible)
+## 2. Tier 1 — widen the visible retry budget (default on)
 
-`agent/request-error` is a **waterfall**: a listener that returns
-`{ kind: 'retry' }` without calling `next()` makes the loop retry the *same step*
-in place. This plugin waits its own backoff (`retryBaseDelayMs × 2^attempt`,
-capped at 60s) and then claims recovery, up to `maxRequestRetries` — or forever,
-with `retryForever`.
+`agent/request-error` is a **waterfall**. This plugin registers with `prepend`,
+i.e. *ahead of* the product's own `dsh-llm-retry` listener on the same seam. On a
+failed step it replaces `payload.retryPolicy` in place with a wider policy and
+then `next()`-delegates — the retry owner reads the wider policy and does the
+retries *itself*. So every retry shows up as the product's live countdown row
+(the user can watch it tick down and cancel it), and the durable `llm/retry`
+events stay authored by the code whose invariant guarantees them; this plugin
+never forges them.
 
-Nothing is appended to the session — no instruction message, no extra turn, no
-retry row — so a request that fails and then succeeds leaves the transcript
-exactly as if it had worked the first time. Terminal client errors (4xx except
-429) are delegated instead of retried, *before* any budget is consulted, so an
-unlimited budget can never turn a bad API key into an infinite loop. The
-per-step counter is cleared at `turn/end`.
+The normal-mode replacement is `{ mode: 'normal', maxRetries: maxRequestRetries,
+retryableCodes, …backoff }`: `maxRetries` comes from this plugin's budget
+(default 30), the backoff base from `retryBaseDelayMs` (capped at 60s, 20%
+jitter), and `retryableCodes` is **inherited from the provider's own resolved
+policy** (falling back to the product's default set when the step routed to
+none) — i.e. "this plugin owns the retry budget and pacing, the provider still
+owns which errors are worth retrying". Terminal client errors (401, quota, …)
+are not in that set, so they still fail fast; widening the budget never turns a
+bad API key into an infinite loop.
+
+Turning on `retryForever` installs `{ mode: 'always', …backoff }`: the owner
+retries *any* failure forever with no terminal-error guard — which is why it
+stays opt-in, for unattended long tasks.
+
+Only a step that **actually routed to a retry policy** is widened: a request that
+never reached an adapter (`payload.retryPolicy` absent) would be refused by the
+owner anyway, and inventing a policy cannot save it, so it is delegated
+untouched, preserving the owner's own refusal path. Because the retries are done
+and counted entirely by the product's owner, this plugin no longer waits or
+keeps a per-step counter.
 
 The shipped `dsh-llm-retry` also listens on `agent/request-error`, and `dsh-base`
 mounts it **before** this plugin, so it sits upstream: it tries its own policy
@@ -383,9 +420,9 @@ write state and "全部恢复默认".
 
 | field | default | meaning |
 | --- | --- | --- |
-| `retryFailedRequests` | `true` | retry a failed request inside the same step (invisible) |
-| `maxRequestRetries` | `3` | how many in-turn retries before delegating (`0` = none) |
-| `retryForever` | `false` | ignore the budget and retry until success or abort |
+| `retryFailedRequests` | `true` | widen the provider's *visible* retry budget on a failed request |
+| `maxRequestRetries` | `30` | the visible retry budget handed to the product's retry owner (`0` = none) |
+| `retryForever` | `false` | hand over an `always` policy — retry until success or abort (drops the terminal-error guard) |
 | `retryBaseDelayMs` | `2000` | backoff base: 2s, 4s, 8s … capped at 60s |
 | `keepAliveOnMaxTokens` | `true` | keep a truncated turn open and continue inside it |
 | `maxTurnContinues` | `5` | continued steps allowed inside one turn (`0` = no limit) |
@@ -395,13 +432,60 @@ write state and "全部恢复默认".
 | `onAborted` | `true` | continue after a *system* cancellation (parent agent / hook); a human stop is never continued |
 | `onError` | `true` | continue after a model request failure |
 | `onInterrupted` | `true` | continue after a crash-orphaned turn |
+| `onMaxTokens` | `true` | continue when the answer hit the output ceiling and stopped short (fires only when the closing step really was truncated) |
 | `sendBecomesContinue` | `true` | hand the shipped send button the continuation while the composer is empty (see §1.1) |
 | `hideContinueRow` | `true` | hide this plugin's own collapsed rows in Chat |
 | `continuedRailMarks` | `hide` | how the rail presents rounds this plugin continued (`hide` / `preview` / `keep`) |
 | `continueText` | (built-in) | the instruction sent to the model |
 
-`onAborted` / `onError` / `onInterrupted` are disabled while `autoContinue` is
-off, because they only describe when that tier fires.
+`onAborted` / `onError` / `onInterrupted` / `onMaxTokens` are disabled while
+`autoContinue` is off, because they only describe when that tier fires.
+
+> Why `onMaxTokens` needs a verdict of its own: DSH pins a turn's `turn/end`
+> reason to `max-tokens` the moment **any** step hits the output ceiling, and a
+> later step can never downgrade it. So a turn that tier 2 already rescued and
+> carried to completion wears the same reason as one that genuinely stopped
+> short. The plugin separates them with the **closing step's own finish reason**
+> (live, from `agent/assistant-stream`, on the host; read back out of the
+> `assistant/message` stream records in the browser): only a closing step that is
+> itself at the ceiling counts as unfinished. The same verdict is what keeps
+> tiers 2 and 3 from answering one break twice.
+
+> Why the card can say "the host did not accept this write": `configForms`
+> answers a **refused** write by resolving `false`, not by rejecting
+> (`ConfigFormController.mutate` returns `false` on `!response.ok`, and `enqueue`
+> resolves `false` outright under the memory persistence mode). An earlier
+> version only attached a success handler, so a refused write still painted
+> "已生效（无需保存）" — with the user's own draft left sitting in the editor,
+> looking exactly like a value the host had taken. Every write, every per-field
+> reset and the bulk "reset everything" now read that boolean, and report success
+> only when every operation landed. The numeric inputs also carry the host
+> schema's `.max()`, so the refusal cannot happen in the first place; the
+> regression harness compares the card's cap table against the host schema
+> field by field.
+
+### 1.2 The send-button takeover requires a single composer
+
+The takeover rests on two document-wide facts: this plugin's pending-continuation
+state is **plugin-wide** (published by whichever session's control rendered
+last), and `primaryButtons()` sweeps **every** composer card in the document.
+With one card on the page those two facts name the same composer; with two they
+do not — the last publisher's state dresses a stranger's send button, and a click
+can no longer be attributed to a session at all.
+
+So `soleComposer()` gates the path: on more than one `[data-composer-card]` the
+plugin **stands down entirely**, hands back every button it already holds, and
+dresses none. The click is likewise resolved from the **clicked button's own
+card** (`controlInCard(cardOf(button))`) rather than the document's first
+`.dyn-retry-round`, and the fallback branch declines on two cards as well.
+
+The product renders one card per conversation
+(`renderSlot('conversation.composer.bar', …)` — the empty-session hero look is a
+`variant` of that same single render, not a second instance), and the layout
+mounts the centre panel through the keyed `main` slot, so one card is today's
+normal shape; the guard is for the day that stops being true. Either way,
+**standing down only makes the feature idle, never wrong** — and the round
+control is scoped by its own slot, so it is unaffected by the guard.
 
 ### How the values get in and out (0.1.7's configuration model)
 
@@ -440,8 +524,7 @@ in memory for that session) is labelled too.
 
 > **Coexistence:** `dsh-client-auto-continue` also ships in this profile and also
 > auto-continues interrupted turns (with a *user-sourced* message, which does show
-> a bubble). Run one of them, and note that it is the visible path — tiers 1 and 2
-> above are silent either way. This plugin yields if the other fires first: any
+> a bubble). Run one of them. This plugin yields if the other fires first: any
 > user-sourced message cancels its pending continuation.
 
 ## Layout
@@ -477,7 +560,7 @@ in `lib/client.js`, and the host module's own exports — so the decisions the
 shipped code runs are the decisions under test:
 
 ```sh
-node dsh-restart-task/restart-task.test.mjs   # 299 assertions, both halves
+node dsh-restart-task/restart-task.test.mjs   # 426 assertions, both halves
 ```
 
 The suite has four layers, because the port to 0.1.7 failed in three ways and the
@@ -494,11 +577,12 @@ row/rail presentation can only be judged by its effect on a document:
    retired settings seam and the retired seats/selectors are gone, the row-hiding
    rule is keyed on this plugin's own tag, and both style tags name their owner.
 3. **Host behaviour** — `lib/index.js` is imported for real and driven through a
-   stub Cordis context: the command posts one producer-sourced message, a 401 is
-   delegated while a 500 waits and retries in place, an aborted wait delegates, a
-   truncated step steers inside its turn while a completed one does not, and the
-   turn-level tier continues only when enabled — never after a human stop, and
-   never past its streak cap.
+   stub Cordis context: the command posts one producer-sourced message, a failed
+   step that routed to a retry policy has that policy widened in place before it
+   delegates while a step with no policy and a stopped turn are delegated
+   untouched, a truncated step steers inside its turn while a completed one does
+   not, and the turn-level tier continues only when enabled — never after a human
+   stop, and never past its streak cap.
 4. **Transcript, rail and the send button, over a stub DOM** — the browser half is
    loaded and applied against a fake document holding one plugin round, one human
    round (carrying this plugin's in-turn steer), a foreign context row, a foreign
@@ -540,9 +624,10 @@ against the release it declares:
 
 What the model sees, per tier:
 
-- **Tier 1** is invisible: a retried request reconstructs the same step from the
-  same durable history, with no retry event, delay or provider error reaching the
-  model.
+- **Tier 1** stays out of the model's context: the retry is executed by the
+  product's own retry owner, so a retried request reconstructs the same step from
+  the same durable history — the live countdown row the user sees is UI state, not
+  a retry event, delay or provider error reaching the model.
 - **Tier 2** adds one `user/message` whose `source.kind` is this plugin's name:
   the model reads the instruction, the human reads a collapsed row (hidden by
   default).
@@ -596,8 +681,8 @@ field; removing the dependency removes the row again on the next start.
 > arguments through a shell, so a path containing spaces is split into several
 > bogus dependencies.
 
-**Requirements.** DSH `>=0.1.7-rc.1 <0.1.8-0 || >=0.1.8-rc.1 <0.2.0-0` (declared as
-an enforced `peerDependencies["@deepseek-ai/dsh"]` range, so an older runtime skips
+**Requirements.** DSH `>=0.1.7-rc.1 <0.1.8-0 || >=0.1.8-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0` (declared as
+an enforced `peerDependencies["@deepseek-ai/dsh"]` range, so a runtime outside it skips
 the bundle with the loader's own compatibility line instead of failing somewhere
 inside it), Node `>=24`, and one runtime dependency — `@deepseek-ai/schemastery
 ^3.18.4`, the first release whose schemas can be `.volatile()`. A development

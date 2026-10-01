@@ -91,10 +91,11 @@ function materialize(source, start, end, names) {
 }
 
 const host = materialize(hostSource, '// #region auto-logic', '// #endregion auto-logic', [
-  'planRequestRetry',
+  'planRetryBoost',
   'planKeepAlive',
   'planAutoContinue',
   'isUserStop',
+  'truncationOf',
   'resolveConfig',
   'liveConfig',
   'foldRounds',
@@ -107,12 +108,14 @@ const host = materialize(hostSource, '// #region auto-logic', '// #endregion aut
 const client = materialize(clientSource, '// #region core-logic', '// #endregion core-logic', [
   'textOfContent',
   'analyzeWindow',
+  'finishOfStream',
   'ownWakingTurns',
   'restartAffordance',
   'policySummary',
   'numberOr',
   'fieldIsServed',
   'railMarkMode',
+  'BROKEN_END_KINDS',
   'BUNDLE_NAME',
   'ENTRY_ID',
   'OWN_SOURCE_KIND',
@@ -122,7 +125,7 @@ const defaults = host.resolveConfig(undefined)
 
 // ---------------------------------------------------------------- resolveConfig
 equal('defaults: in-turn retry on', defaults.retryFailedRequests, true)
-equal('defaults: retry budget 3', defaults.maxRequestRetries, 3)
+equal('defaults: retry budget 30', defaults.maxRequestRetries, 30)
 equal('defaults: unlimited retry off', defaults.retryForever, false)
 equal('defaults: backoff base 2000', defaults.retryBaseDelayMs, 2000)
 equal('defaults: keep-alive on', defaults.keepAliveOnMaxTokens, true)
@@ -136,7 +139,7 @@ equal('defaults: built-in continue text', defaults.continueText, host.DEFAULT_CO
 
 const junk = host.resolveConfig({ retryFailedRequests: 'yes', maxRequestRetries: '9', continueText: '   ', autoContinue: 1 })
 equal('junk: non-boolean keeps retry on', junk.retryFailedRequests, true)
-equal('junk: non-number falls back to 3', junk.maxRequestRetries, 3)
+equal('junk: non-number falls back to 30', junk.maxRequestRetries, 30)
 equal('junk: blank text falls back to built-in', junk.continueText, host.DEFAULT_CONTINUE_TEXT)
 equal('junk: truthy-but-not-true keeps auto-continue off', junk.autoContinue, false)
 
@@ -157,35 +160,38 @@ equal('live: a volatile reference is unwrapped', liveRead.retryForever, true)
 equal('live: numbers survive the unwrap', liveRead.maxRequestRetries, 7)
 equal('live: a plain value passes through', liveRead.autoContinue, false)
 equal('live: a string reference is unwrapped', liveRead.continuedRailMarks, 'preview')
-equal('live: the reader covers every declared field', host.CONFIG_FIELDS.length, 16)
-equal('live: an absent config reads as defaults', host.resolveConfig(host.liveConfig(undefined)).maxRequestRetries, 3)
+equal('live: the reader covers every declared field', host.CONFIG_FIELDS.length, 17)
+equal('live: an absent config reads as defaults', host.resolveConfig(host.liveConfig(undefined)).maxRequestRetries, 30)
 equal('live: undefined reads as defaults', host.resolveConfig(host.liveConfig(undefined)).continueText, host.DEFAULT_CONTINUE_TEXT)
 
-// ------------------------------------------------------------- planRequestRetry
-const retryBase = { retryFailedRequests: true, maxRequestRetries: 3, retryForever: false, retryBaseDelayMs: 2000 }
-equal('retry: first attempt retried at base delay', host.planRequestRetry({ config: retryBase, status: 500, used: 0 }).delayMs, 2000)
-equal('retry: second attempt doubles', host.planRequestRetry({ config: retryBase, status: 503, used: 1 }).delayMs, 4000)
-equal('retry: third attempt doubles again', host.planRequestRetry({ config: retryBase, status: 502, used: 2 }).delayMs, 8000)
-equal('retry: delay is capped at 60s', host.planRequestRetry({ config: { retryBaseDelayMs: 2000, maxRequestRetries: 50 }, status: 500, used: 20 }).delayMs, 60000)
-equal('retry: budget exhausted', host.planRequestRetry({ config: retryBase, status: 500, used: 3 }).ok, false)
-equal('retry: no status still retries a network failure', host.planRequestRetry({ config: retryBase, used: 0 }).ok, true)
-equal('retry: 429 is retried', host.planRequestRetry({ config: retryBase, status: 429, used: 0 }).ok, true)
-equal('retry: 400 is terminal', host.planRequestRetry({ config: retryBase, status: 400, used: 0 }).ok, false)
-equal('retry: 401 is terminal', host.planRequestRetry({ config: retryBase, status: 401, used: 0 }).ok, false)
-equal('retry: 404 is terminal', host.planRequestRetry({ config: retryBase, status: 404, used: 0 }).ok, false)
-equal('retry: 500 is not terminal', host.planRequestRetry({ config: retryBase, status: 500, used: 0 }).ok, true)
-
+// -------------------------------------------------------------- planRetryBoost
+// The plugin no longer retries in place; it widens the routed provider's retry
+// policy so the product's own retry owner does the retries *visibly*. The
+// planner returns the replacement policy, never a delay.
+const boostBase = { retryFailedRequests: true, maxRequestRetries: 30, retryForever: false, retryBaseDelayMs: 2000 }
+const boost = host.planRetryBoost({ config: boostBase, current: { mode: 'normal', maxRetries: 5, retryableCodes: ['SERVER'] } })
+equal('boost: a bounded config widens', boost.ok, true)
+equal('boost: it hands the owner a normal policy', boost.policy.mode, 'normal')
+equal('boost: with the configured budget', boost.policy.maxRetries, 30)
+equal('boost: the base delay comes from config', boost.policy.initialDelayMs, 2000)
+equal('boost: the delay is capped at 60s', boost.policy.maxDelayMs, 60000)
+equal('boost: it keeps the provider\'s own terminal verdict', boost.policy.retryableCodes.join(','), 'SERVER')
+// With no policy on the failed step, fall back to the product's default codes
+// rather than inventing an empty (retry-everything) set.
+const boostNoCodes = host.planRetryBoost({ config: boostBase, current: null })
+equal('boost: absent codes fall back to the default set', boostNoCodes.policy.retryableCodes.join(','), 'EMPTY_RESPONSE,RATE_LIMIT,SERVER,TIMEOUT,TRANSPORT')
+// Unlimited hands the owner an `always` policy, which omits maxRetries (its
+// invariant requires that) and drops the terminal-code guard.
 const unlimited = { retryFailedRequests: true, maxRequestRetries: 0, retryForever: true, retryBaseDelayMs: 2000 }
-equal('retry: unlimited ignores the budget', host.planRequestRetry({ config: unlimited, status: 500, used: 99 }).ok, true)
-equal('retry: unlimited still caps the delay', host.planRequestRetry({ config: unlimited, status: 500, used: 40 }).delayMs, 60000)
-equal('retry: unlimited still refuses 403', host.planRequestRetry({ config: unlimited, status: 403, used: 0 }).ok, false)
-equal('retry: budget 0 means never', host.planRequestRetry({ config: { retryFailedRequests: true, maxRequestRetries: 0 }, used: 0 }).ok, false)
-equal('retry: switched off', host.planRequestRetry({ config: { retryFailedRequests: false }, status: 500, used: 0 }).ok, false)
+const boostForever = host.planRetryBoost({ config: unlimited, current: { mode: 'normal', maxRetries: 5, retryableCodes: ['SERVER'] } })
+equal('boost: unlimited hands the owner an always policy', boostForever.policy.mode, 'always')
+equal('boost: an always policy omits maxRetries', 'maxRetries' in boostForever.policy, false)
+equal('boost: switched off does not widen', host.planRetryBoost({ config: { retryFailedRequests: false }, current: null }).ok, false)
+equal('boost: a zero budget does not widen', host.planRetryBoost({ config: { retryFailedRequests: true, maxRequestRetries: 0 }, current: null }).ok, false)
 // A planner handed a partial config must decide like the runner, which fills
-// every field first: absent means "leave the default alone", not "off".
-equal('retry: an absent switch reads as its default (on)', host.planRequestRetry({ config: {}, status: 500, used: 0 }).ok, true)
-equal('retry: an absent budget reads as the schema default', host.planRequestRetry({ config: {}, status: 500, used: 3 }).ok, false)
-equal('retry: reports the attempt it is about to make', host.planRequestRetry({ config: retryBase, status: 500, used: 1 }).why, 'in-turn retry 2/3')
+// every field first: absent means "use the schema default", not "off".
+equal('boost: an absent switch reads as its default (on)', host.planRetryBoost({ config: {}, current: null }).ok, true)
+equal('boost: an absent budget reads as the schema default (30)', host.planRetryBoost({ config: {}, current: null }).policy.maxRetries, 30)
 
 // ---------------------------------------------------------------- planKeepAlive
 const keepBase = { keepAliveOnMaxTokens: true, maxTurnContinues: 5 }
@@ -217,7 +223,29 @@ equal('auto: orphaned turn can be excluded', host.planAutoContinue({ reason: 'in
 equal('auto: excludes do not leak into other reasons', host.planAutoContinue({ reason: 'error', config: { autoContinue: true, onAborted: false }, consecutive: 0 }).ok, true)
 equal('auto: an absent exclude reads as enabled', host.planAutoContinue({ reason: 'aborted', config: { autoContinue: true }, consecutive: 0 }).ok, true)
 equal('auto: an absent cap reads as the schema default', host.planAutoContinue({ reason: 'error', config: { autoContinue: true }, consecutive: 3 }).ok, false)
-equal('auto: the three broken reasons are exactly these', host.BROKEN_REASONS.join(','), 'aborted,error,interrupted')
+equal('auto: the four broken reasons are exactly these', host.BROKEN_REASONS.join(','), 'aborted,error,interrupted,max-tokens')
+
+// ------------------------------------------------------------- truncationOf
+// `max-tokens` is the loop's *sticky* turn-end reason: it is pinned as soon as
+// one step hits the ceiling and survives every later step, so a turn tier 2
+// already rescued wears it too. The closing step's own finish is the only thing
+// that separates "cut off" from "was cut off and finished".
+equal('cut: max-tokens with a truncated closing step is unfinished', host.truncationOf('max-tokens', 'max-tokens'), true)
+equal('cut: max-tokens whose closing step finished is complete', host.truncationOf('max-tokens', 'stop'), false)
+equal('cut: an unobserved closing step trusts the durable reason', host.truncationOf('max-tokens', undefined), true)
+equal('cut: an empty closing step trusts the durable reason', host.truncationOf('max-tokens', ''), true)
+equal('cut: another reason is never a truncation', host.truncationOf('error', 'max-tokens'), false)
+equal('cut: a missing reason is never a truncation', host.truncationOf(undefined, 'max-tokens'), false)
+equal('cut: the reason constant is the finish constant', host.TRUNCATED_FINISH, 'max-tokens')
+
+equal('auto: truncation continues by default', host.planAutoContinue({ reason: 'max-tokens', truncated: true, config: { autoContinue: true }, consecutive: 0 }).ok, true)
+equal('auto: a rescued turn does not continue again', host.planAutoContinue({ reason: 'max-tokens', truncated: true, config: { autoContinue: true }, consecutive: 0 }).why, 'broken turn (max-tokens)')
+equal('auto: the sticky reason is refused when nothing was cut off', host.planAutoContinue({ reason: 'max-tokens', truncated: false, config: { autoContinue: true }, consecutive: 0 }).why, 'the turn was kept alive and finished')
+equal('auto: an absent truncation verdict is refused', host.planAutoContinue({ reason: 'max-tokens', config: { autoContinue: true }, consecutive: 0 }).ok, false)
+equal('auto: the truncation cause can be excluded', host.planAutoContinue({ reason: 'max-tokens', truncated: true, config: { autoContinue: true, onMaxTokens: false }, consecutive: 0 }).why, 'output ceiling is not enabled')
+equal('auto: the truncation cap still applies', host.planAutoContinue({ reason: 'max-tokens', truncated: true, config: { autoContinue: true, maxConsecutive: 2 }, consecutive: 2 }).ok, false)
+equal('auto: the truncation cause does not leak into other reasons', host.planAutoContinue({ reason: 'error', truncated: false, config: { autoContinue: true }, consecutive: 0 }).ok, true)
+
 
 // ---------------------------------------------------------------- analyzeWindow
 function windowOf(events) {
@@ -240,9 +268,37 @@ equal('window: error message is surfaced', client.analyzeWindow(windowOf([end('e
 equal('window: aborted turn is broken', client.analyzeWindow(windowOf([end('aborted')])).badEnd, 'aborted')
 equal('window: interrupted turn is broken', client.analyzeWindow(windowOf([end('interrupted')])).badEnd, 'interrupted')
 equal('window: completed turn is clean', client.analyzeWindow(windowOf([end('completed')])).badEnd, '')
-equal('window: truncated turn is clean (no continuation prompt)', client.analyzeWindow(windowOf([end('max-tokens')])).badEnd, '')
+// No assistant message means no closing-step evidence, so the sticky reason is
+// not enough to call the turn truncated: the card must not offer to continue
+// work it cannot prove stopped short.
+equal('window: a bare max-tokens end is not enough on its own', client.analyzeWindow(windowOf([end('max-tokens')])).badEnd, '')
 equal('window: a later good turn clears an earlier break', client.analyzeWindow(windowOf([end('error'), human('retry'), end('completed')])).badEnd, '')
 equal('window: reason-less turn end is clean', client.analyzeWindow(windowOf([end(undefined)])).badEnd, '')
+
+// The closing assistant message carries the raw stream records, and its finish
+// chunk is the per-step truncation evidence the durable log otherwise lacks.
+const assistantStep = (finish) => ({
+  type: 'assistant/message',
+  data: {
+    turn: 1,
+    step: 1,
+    content: [{ type: 'text', text: 'half an answer' }],
+    stream: [
+      { type: 'text-chunks', time0: 0, index: 0, dt: [1], texts: ['half'] },
+      { type: 'chunk', time: 2, chunk: { type: 'finish', reason: { kind: finish } } },
+    ],
+  },
+})
+const cutOff = windowOf([human('write it'), assistantStep('max-tokens'), end('max-tokens')])
+equal('stream: the finish reason is read back', client.finishOfStream(assistantStep('max-tokens').data.stream), 'max-tokens')
+equal('stream: a stream without a finish reads empty', client.finishOfStream([{ type: 'text-chunks' }]), '')
+equal('stream: a missing stream reads empty', client.finishOfStream(undefined), '')
+equal('window: a genuinely cut-off turn is broken', client.analyzeWindow(cutOff).badEnd, 'max-tokens')
+// The rescue case: tier 2 kept the turn alive and its closing step finished, so
+// the turn still *reports* max-tokens but the work is complete.
+const rescued = windowOf([human('write it'), assistantStep('max-tokens'), assistantStep('stop'), end('max-tokens')])
+equal('window: a rescued turn is not broken', client.analyzeWindow(rescued).badEnd, '')
+equal('window: a fresh turn drops the previous closing finish', client.analyzeWindow(windowOf([assistantStep('max-tokens'), { type: 'turn/start', data: { turn: 2 } }, end('max-tokens')])).badEnd, '')
 equal('text: missing content is empty', client.textOfContent(undefined), '')
 
 // -------------------------------------------------------------- ownWakingTurns
@@ -329,20 +385,46 @@ equal('button: a failed send with nothing to resend is hidden', emptySend.show, 
 const brokenNoPrompt = affordance([end('error')])
 equal('button: a broken turn still offers continue with no prompt', brokenNoPrompt.show && brokenNoPrompt.mode, 'continue')
 
+// A cut-off answer is the plugin's headline case: the composer must offer the
+// same one-click continue, and say what happened in the user's own terms.
+const truncatedTurn = affordance([human('write the report'), assistantStep('max-tokens'), end('max-tokens')])
+equal('button: shown after a genuinely truncated turn', truncatedTurn.show && truncatedTurn.mode, 'continue')
+equal('button: names the output ceiling', truncatedTurn.reason, '上次回复达到输出上限、没写完')
+equal('button: still promises no duplicate prompt', truncatedTurn.title.indexOf('不会重复你的消息') > 0, true)
+equal('button: the prompt is kept for a resend fallback', truncatedTurn.text, 'write the report')
+// The rescue case must not offer anything: the turn reports max-tokens, but its
+// closing step finished, so there is no unfinished work to continue.
+const rescuedTurn = affordance([human('write the report'), assistantStep('max-tokens'), assistantStep('stop'), end('max-tokens')])
+equal('button: hidden after a rescued turn', rescuedTurn.show, false)
+// And the offer still stands down while the agent runs or a message is queued.
+equal('button: hidden while a truncated turn is still running', affordance([human('x'), assistantStep('max-tokens'), end('max-tokens')], { running: true }).show, false)
+equal('button: a truncated turn stands down behind a queued message', affordance([human('x'), assistantStep('max-tokens'), end('max-tokens')], { queuePending: true }).show, false)
+
+// A queued message is the human's own continuation (inbox `next-turn`): the
+// affordance must stand down so it never posts a second, competing message into
+// the same slot. The mode is still computed — only `show` is withheld.
+const queuedBroken = affordance([human('ship it'), end('error')], { queuePending: true })
+equal('queue: a broken turn stands down while a message is queued', queuedBroken.show, false)
+equal('queue: the mode is still continue underneath', queuedBroken.mode, 'continue')
+const queuedResend = affordance([human('ship it')], { promptFailed: true, queuePending: true })
+equal('queue: a failed send stands down while a message is queued', queuedResend.show, false)
+const notQueuedBroken = affordance([human('ship it'), end('error')], { queuePending: false })
+equal('queue: an explicit empty queue still shows', notQueuedBroken.show, true)
+
 // ------------------------------------------------------------------- policySummary
 const chips = client.policySummary({ retryFailedRequests: true, maxRequestRetries: 5, keepAliveOnMaxTokens: true, autoContinue: false })
 equal('chips: three of them', chips.length, 3)
-equal('chips: retry budget is quoted', chips[0].text, '失败静默重试 5 次')
+equal('chips: retry budget is quoted', chips[0].text, '失败可见重试 5 次')
 equal('chips: retry is a good state', chips[0].tone, 'on')
 equal('chips: truncation is continued in-turn', chips[1].text, '输出超限同轮续写')
 equal('chips: turn-level continuation reads as off', chips[2].text, '中断后不自动继续')
 const unlimitedChips = client.policySummary({ retryForever: true, autoContinue: true })
-equal('chips: unlimited retry is named', unlimitedChips[0].text, '失败静默重试（不限次）')
+equal('chips: unlimited retry is named', unlimitedChips[0].text, '失败可见重试（不限次）')
 equal('chips: auto-continue is flagged', unlimitedChips[2].tone, 'alert')
 const quietChips = client.policySummary({ retryFailedRequests: false, keepAliveOnMaxTokens: false })
 equal('chips: switched-off retry', quietChips[0].text, '失败不自动重试')
 equal('chips: switched-off keep-alive', quietChips[1].text, '输出超限不续写')
-equal('chips: empty settings read as defaults', client.policySummary(undefined)[0].text, '失败静默重试 3 次')
+equal('chips: empty settings read as defaults', client.policySummary(undefined)[0].text, '失败可见重试 30 次')
 equal('numbers: a non-number falls back', client.numberOr('3', 7), 7)
 equal('numbers: a real zero survives', client.numberOr(0, 7), 0)
 
@@ -373,12 +455,18 @@ equal('identity: both halves agree on the producer kind', client.OWN_SOURCE_KIND
 // major.minor.patch tuple carries a prerelease tag, so each supported tuple needs
 // its own branch: an open-ended `>=0.1.7-rc.1` admits the next *stable* patch but
 // silently excludes its release candidates, which is how a broad-looking range
-// locks users out of the next harness rc.
-const RUNTIME_RANGE = '>=0.1.7-rc.1 <0.1.8-0 || >=0.1.8-rc.1 <0.2.0-0'
+// locks users out of the next harness rc. The 0.2 train is admitted the same way:
+// `>=0.2.0-rc.1` is what lets the `0.2.0-rc.1` prerelease (npm's `next` tag) itself
+// through, and `<0.3.0-0` keeps the next minor out. The host enforces exactly this
+// field — `evaluatePluginCompatibility` runs `semver.satisfies(runtime, range,
+// { includePrerelease: true })` over `peerDependencies` at install and launch, and
+// never reads `engines`; `engines.dsh` is kept in agreement for the manifest reader.
+const RUNTIME_RANGE = '>=0.1.7-rc.1 <0.1.8-0 || >=0.1.8-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0'
 equal('identity: the manifest requires the settings-era runtime', manifest.peerDependencies['@deepseek-ai/dsh'], RUNTIME_RANGE)
 equal('identity: the engines range agrees', manifest.engines.dsh, RUNTIME_RANGE)
-equal('identity: every supported tuple carries a prerelease branch', (RUNTIME_RANGE.match(/>=0\.\d+\.\d+-rc\.\d+/g) ?? []).length, 2)
-equal('identity: the range keeps the next major out', RUNTIME_RANGE.includes('<0.2.0-0'), true)
+equal('identity: every supported tuple carries a prerelease branch', (RUNTIME_RANGE.match(/>=0\.\d+\.\d+-rc\.\d+/g) ?? []).length, 3)
+equal('identity: the 0.2 train is admitted from its first rc', RUNTIME_RANGE.includes('>=0.2.0-rc.1 <0.3.0-0'), true)
+equal('identity: the range keeps the next minor out', RUNTIME_RANGE.includes('<0.3.0-0'), true)
 
 // ------------------------------------------- the whole-session rounds fold
 // The rail lists every round of a session while a client only holds one page of
@@ -426,9 +514,108 @@ const hostKeys = configKeys()
 equal('config: every field has a card default', hostKeys.every((key) => key in { ...clientDefaults() }), true)
 equal('config: every card default is declared by the host', Object.keys(clientDefaults()).every((key) => hostKeys.includes(key)), true)
 equal('config: the retention setting is served', hostKeys.includes('hideContinueRow'), true)
-equal('config: retry budget allows more than the old cap', hostSource.includes('z.natural().max(50).default(3).volatile()'), true)
+// The retry budget must stay a *budget*, not regress to the retired 3-attempt cap.
+// The pattern is anchored on the field name: an unanchored probe for
+// `.max(50).default(3).volatile()` also matches `maxConsecutive`, which is how
+// this assertion silently stopped testing anything.
+const retryFieldLine = (hostSource.match(/^\s*maxRequestRetries: z\.natural\(\)[^\n]*$/m) ?? [''])[0]
+equal('config: the retry budget is 30 and its cap is 50', retryFieldLine.includes('z.natural().max(50).default(30).volatile()'), true)
 equal('config: every declared field is volatile', (hostSource.slice(hostSource.indexOf('export const Config = z.object({')).match(/\.volatile\(\),/g) ?? []).length, hostKeys.length)
 equal('config: the reader covers exactly the declared fields', host.CONFIG_FIELDS.join(','), hostKeys.join(','))
+
+/**
+ * Every `Config` field's declared schema default, read straight out of the
+ * schema text. The card keeps its own copy of these so it can render a value for
+ * a field the user layer never wrote, and a copy that drifts is invisible: the
+ * card simply shows a number the host does not use. Key parity alone cannot see
+ * that, which is how `maxRequestRetries` came to read 3 on the card while the
+ * host applied 30.
+ */
+function hostSchemaDefaults() {
+  const start = hostSource.indexOf('export const Config = z.object({')
+  const stop = hostSource.indexOf('})', start)
+  const body = hostSource.slice(start, stop)
+  const out = {}
+  for (const match of body.matchAll(/^\s{2}([A-Za-z][A-Za-z0-9]*): z\.([A-Za-z]+)\(\)([^\n]*)$/gm)) {
+    const field = match[1]
+    const kind = match[2]
+    const declared = /\.default\(([^)]*)\)/.exec(match[3])
+    if (declared === null) continue
+    const raw = declared[1]
+    if (kind === 'boolean') out[field] = raw === 'true'
+    else if (kind === 'natural' || kind === 'number') out[field] = Number(raw)
+    else out[field] = raw.startsWith("'") && raw.endsWith("'") ? raw.slice(1, -1) : raw
+  }
+  return out
+}
+
+function clientDefaultValues() {
+  const start = clientSource.indexOf('const DEFAULTS = {')
+  const stop = clientSource.indexOf('\n\t\t}', start)
+  const body = clientSource.slice(start, stop)
+  const out = {}
+  for (const match of body.matchAll(/^\s+([A-Za-z][A-Za-z0-9]*): (.*),$/gm)) {
+    const raw = match[2].trim()
+    if (raw === 'true') out[match[1]] = true
+    else if (raw === 'false') out[match[1]] = false
+    else if (/^-?\d+(\.\d+)?$/.test(raw)) out[match[1]] = Number(raw)
+    else out[match[1]] = raw.replace(/^'/, '').replace(/'$/, '')
+  }
+  return out
+}
+
+const schemaDefaults = hostSchemaDefaults()
+const cardDefaultValues = clientDefaultValues()
+// The client's `''` for the continuation prompt is the "inherit the host default"
+// marker, not a value: the text itself is long, localized, and owned by the host.
+const drift = Object.keys(schemaDefaults)
+  .filter((key) => key !== 'continueText')
+  .filter((key) => cardDefaultValues[key] !== schemaDefaults[key])
+  .map((key) => key + '=' + JSON.stringify(cardDefaultValues[key]) + '/' + JSON.stringify(schemaDefaults[key]))
+equal('config: every schema default reaches the card unchanged', drift.join(' '), '')
+equal('config: the card inherits the host continuation prompt', cardDefaultValues.continueText, '')
+equal('config: the truncation trigger defaults on', schemaDefaults.onMaxTokens, true)
+equal('config: not every switch defaults on (the probe is real)', schemaDefaults.autoContinue, false)
+
+/**
+ * The numeric caps the Host schema enforces, read out of the same schema text.
+ * `configForms` answers a refused write with `false` (it does not reject), so a
+ * value past the cap is a write that silently never lands; the card states the
+ * cap on the input to keep that from happening at all, and this keeps the card's
+ * copy honest.
+ */
+function hostSchemaMaxima() {
+  const start = hostSource.indexOf('export const Config = z.object({')
+  const stop = hostSource.indexOf('})', start)
+  const body = hostSource.slice(start, stop)
+  const out = {}
+  for (const match of body.matchAll(/^\s{2}([A-Za-z][A-Za-z0-9]*): z\.natural\(\)\.max\((\d+)\)/gm)) {
+    out[match[1]] = Number(match[2])
+  }
+  return out
+}
+
+function clientMaxima() {
+  const start = clientSource.indexOf('const MAXIMA = {')
+  const stop = clientSource.indexOf('\n\t\t}', start)
+  const body = clientSource.slice(start, stop)
+  const out = {}
+  for (const match of body.matchAll(/^\s+([A-Za-z][A-Za-z0-9]*): (\d+),$/gm)) out[match[1]] = Number(match[2])
+  return out
+}
+
+const schemaMaxima = hostSchemaMaxima()
+equal('config: the card states every numeric cap the host enforces', JSON.stringify(clientMaxima()), JSON.stringify(schemaMaxima))
+equal('config: the retry cap is the host\'s own 50', clientMaxima().maxRequestRetries, 50)
+equal('config: the cap reaches the input', clientSource.includes('max: props.max'), true)
+equal('config: the row hands the cap to the control', clientSource.includes('max: MAXIMA[field]'), true)
+// A refused write resolves `false`; settlement alone is therefore not success.
+equal('config: a refused write is not treated as accepted', clientSource.includes('function accepted(result)') && clientSource.includes('result !== false'), true)
+equal('config: the refusal is reported to the user', clientSource.includes('宿主没有接受这次写入'), true)
+equal('config: the per-field write reports the verdict', clientSource.includes('.then(report, reportFailure)'), true)
+equal('config: the bulk reset reports the verdict too', clientSource.includes('report(results.every(accepted))'), true)
+// The stale success handler would paint "已生效" over a write that never landed.
+equal('config: no bare settlement success handler survives', /\.then\(\s*\(\)\s*=>\s*\{\s*setFailure\(null\); ping\(\)/.test(clientSource), false)
 // The retired seam is gone, not renamed: `SettingsForms` has neither `register`
 // nor `get`, and a leftover call fails the whole plugin at load.
 equal('config: the retired settings namespace API is gone', /settings\.register\(/.test(codeOf(hostSource)), false)
@@ -519,10 +706,38 @@ equal('send: only ever a control the product cannot use', clientSource.includes(
 equal('send: nothing writes the product\'s class list', /\.className\s*=/.test(codeOf(clientSource)), false)
 equal('send: the click is intercepted in the capture phase', clientSource.includes("document.addEventListener('click', onClick, true)"), true)
 equal('send: and released when the plugin unloads', clientSource.includes("document.removeEventListener('click', onClick, true)"), true)
-equal('send: it runs the control\'s own action, not a copy of it', clientSource.includes("document.querySelector('.dyn-retry-round')"), true)
+equal('send: it runs the control\'s own action, not a copy of it', clientSource.includes('controlInCard(cardOf(button))'), true)
+// The lookup must start from the clicked button's own card. A document-wide query
+// is exactly what let one session's composer continue another session's task, so
+// it is pinned out rather than merely replaced.
+equal('send: never by a document-wide control query', clientSource.includes("document.querySelector('.dyn-retry-round')"), false)
+equal('send: the click hands its own button to the resolver', clientSource.includes('runContinuation(button)'), true)
+equal('send: two composer cards stand the takeover down', clientSource.includes('if (soleComposer() !== true) {'), true)
+equal('send: and the stand-down hands every held button back', clientSource.includes('for (const button of Array.from(held)) releaseButton(button)'), true)
+equal('send: the click fallback declines on two cards too', clientSource.includes('if (soleComposer() !== true) return'), true)
 equal('send: a draft is re-read before the takeover is kept', clientSource.includes('composerHasDraft(cardOf(button)) !== true'), true)
 equal('send: a click with a draft is re-checked at the click', clientSource.includes('if (composerHasDraft(cardOf(button)) === true) return'), true)
-equal('send: the release restores the product\'s empty-composer verdict', clientSource.includes('if (composerHasDraft(cardOf(button)) !== true) button.disabled = true'), true)
+// Bug fix (grey/unclickable stop button): `releaseButton` must NEVER write
+// `disabled = true`. The product's primary control is one reused DOM node whose
+// role React swaps between *send* and *stop*; a release can land on it while it
+// is the STOP button (the takeover held it as the idle-empty send button, the
+// human clicked continue, a turn started), and forcing it disabled greys out
+// stop so the running turn can no longer be paused. React owns that flag.
+equal('send: release never writes disabled (would grey out the reused stop button)', /button\.disabled\s*=\s*true/.test(codeOf(clientSource)), false)
+equal('send: and the release records why it must not', clientSource.includes('Never write `disabled` here'), true)
+// Bug fix (orange "continue" on the new-project / workspace-selection screen with
+// an empty composer): the takeover sweep runs for the whole plugin lifetime and
+// reads only `affordance.current`, so a `mode:'continue'` left behind when the
+// transcript moves to a screen that mounts no composer control of its own is
+// repainted onto that screen's idle-empty (disabled) send button — a blank
+// composer turned into an orange "continue". The control must retract its offer
+// when it leaves the DOM. There are exactly two publishes: the live report and
+// this unmount retract.
+equal('send: exactly two affordance publishes — the live report and the unmount retract', (clientSource.match(/affordance\.publish\(/g) ?? []).length, 2)
+equal('send: the offer is retracted when the composer control unmounts', clientSource.includes("affordance.publish({ sessionId: sessionId, mode: '', title: '', state: 'idle', message: '' })"), true)
+// The retract fires only while the hub still holds THIS session's own live offer,
+// so a second composer that already published its own continuation is untouched.
+equal('send: the retract only clears this session\'s own live offer', clientSource.includes('current.sessionId !== sessionId'), true)
 // Session format v4 refuses the retired `{ kind: 'plugin', plugin: … }` wrapper
 // on newly appended messages, so the continuation must carry this producer's
 // own kind. Regressing to `'plugin'` fails the whole turn.
@@ -559,9 +774,12 @@ equal('stop: the flag alone never enables a path', breakTurn('completed', true, 
 equal('stop: the watcher reads the cancel cause', hostSource.includes('isUserStop(endReason.reason)'), true)
 equal('stop: the cause reaches the planner', hostSource.includes('userStop: userStop === true'), true)
 equal('stop: a request killed by a stop is never retried', hostSource.includes('stopSignal.aborted === true) return next()'), true)
-// A bare `undefined` from the retry waterfall settles the failure for every
-// listener behind this one; an aborted wait must delegate instead.
-equal('stop: an aborted wait delegates instead of vetoing it', hostSource.includes("aborted === true ? next() : { kind: 'retry' }"), true)
+// The boost listener never settles the failure itself: every path ends in
+// `next()`, so the retry owner behind it still runs and authors the events.
+equal('stop: the boost always delegates, never vetoes', hostSource.includes('payload.retryPolicy = plan.policy') && hostSource.includes('return next()'), true)
+// It runs ahead of the product's own retry owner (prepend), so the wider
+// policy is in place before that owner reads it.
+equal('stop: the boost listener is prepended', hostSource.includes("}, true), 'restart-task: visible retry boost')"), true)
 
 // -------------------------------------------------- the host half, for real
 /**
@@ -708,17 +926,26 @@ equal('host: and it is a user-role message', runtime.state.followups[0].role, 'u
 const requestError = runtime.state.listeners.get('agent/request-error')
 let delegated = 0
 const next = () => { delegated += 1; return 'delegated' }
-equal('host: a terminal client error is delegated', await requestError({ agent, turn: 1, step: 1, failure: { status: 401 } }, next), 'delegated')
-equal('host: a terminal error never waits', runtime.state.timers.length, 0) 
-const retried = requestError({ agent, turn: 1, step: 1, failure: { status: 500 } }, next)
-equal('host: a retryable failure waits before retrying', runtime.state.timers.length, 1)
-await runtime.fireTimers()
-equal('host: and then retries in place', JSON.stringify(await retried), JSON.stringify({ kind: 'retry' }))
-const exhausted = requestError({ agent, turn: 1, step: 1, failure: { status: 500 } }, next)
-await runtime.fireTimers()
-equal('host: the retry budget is per step', await exhausted, 'delegated')
-equal('host: a stopped turn is delegated, never retried', await requestError({ agent, turn: 1, step: 2, failure: { status: 500 }, signal: { aborted: true } }, next), 'delegated')
-equal('host: delegation counts what it delegated', delegated, 3)
+const routedPolicy = () => ({ mode: 'normal', maxRetries: 5, retryableCodes: ['SERVER'], initialDelayMs: 500, maxDelayMs: 10000, jitterRatio: 0.1 })
+// A failed step that routed to a retry policy has that policy replaced with the
+// plugin's budget in place, then the call is delegated to the product's retry
+// owner, which does the (now visible) retries itself. The boost never waits.
+const widened = { agent, turn: 1, step: 1, failure: { status: 500 }, retryPolicy: routedPolicy() }
+equal('host: a request error is delegated to the retry owner', await requestError(widened, next), 'delegated')
+equal('host: the boost never waits itself', runtime.state.timers.length, 0)
+equal('host: the routed policy is set to the plugin budget', widened.retryPolicy.maxRetries, 1)
+equal('host: the widened policy keeps the provider terminal-vs-transient verdict', widened.retryPolicy.retryableCodes.join(','), 'SERVER')
+// A step that routed to no policy is delegated untouched: a request that reached
+// no adapter cannot be helped by inventing one, and the owner refuses anyway.
+const noPolicy = { agent, turn: 1, step: 2, failure: { status: 500 } }
+equal('host: a policy-less error is delegated', await requestError(noPolicy, next), 'delegated')
+equal('host: and left without a forged policy', noPolicy.retryPolicy, undefined)
+// A stopped turn is handed straight on, its policy untouched: the failure is the
+// stop itself, not something to retry harder.
+const stopped = { agent, turn: 1, step: 3, failure: { status: 500 }, signal: { aborted: true }, retryPolicy: routedPolicy() }
+equal('host: a stopped turn is delegated, never widened', await requestError(stopped, next), 'delegated')
+equal('host: the stopped turn keeps its original policy', stopped.retryPolicy.maxRetries, 5)
+equal('host: delegation counts every delegated call', delegated, 3)
 
 runtime.state.listeners.get('agent/assistant-stream')({ agent, frame: { type: 'chunk', chunk: { type: 'finish', reason: { kind: 'max-tokens' } } } })
 runtime.state.listeners.get('agent/turn-stopping')({ agent, turn: 1 })
@@ -791,6 +1018,99 @@ await capRuntime.fireTimers()
 capRuntime.state.listeners.get('session/event')({ id: 'session-5' }, { type: 'turn/end', data: { turn: 2, reason: { kind: 'error' } } })
 await capRuntime.fireTimers()
 equal('host: the consecutive cap stops the streak', capRuntime.state.followups.length, 1)
+
+// ---- the in-turn tier honours the stop control ------------------------------
+// `agent/turn-stopping` is awaited before the boundary commits, and the loop only
+// re-checks the abort signal *after* the dispatch. So this listener is the last
+// chance to notice that the human already stopped the turn, and taking it would
+// push a fresh instruction into a turn that is ending because they said stop.
+const guardRuntime = makeRuntime({ keepAliveOnMaxTokens: true, maxTurnContinues: 5 })
+hostModule.apply(guardRuntime.ctx, guardRuntime.live)
+const guardAgent = { id: 'session-7', followup: () => {}, steer: (message) => guardRuntime.state.steers.push(message) }
+guardRuntime.agents.set('session-7', guardAgent)
+const steer = (stopSignal) => {
+  guardRuntime.state.listeners.get('agent/assistant-stream')({ agent: guardAgent, frame: { type: 'chunk', chunk: { type: 'finish', reason: { kind: 'max-tokens' } } } })
+  guardRuntime.state.listeners.get('agent/turn-stopping')({ agent: guardAgent, turn: 1, signal: stopSignal })
+}
+steer({ aborted: true })
+equal('host: a stopped turn is never steered into', guardRuntime.state.steers.length, 0)
+steer({ aborted: false })
+equal('host: an unstopped turn is still steered', guardRuntime.state.steers.length, 1)
+// A payload that carries no signal at all must stay steerable: the field is
+// optional in the event contract, and treating "absent" as "stopped" would
+// silently disable the whole tier on a host that omits it.
+steer(undefined)
+equal('host: an absent signal is not a stop', guardRuntime.state.steers.length, 2)
+
+// ---- the sticky max-tokens end reason, through the whole tier ----------------
+// A turn that really stopped short: keep-alive is off, so nothing rescued it and
+// the closing step's own finish agrees with the turn-end reason.
+const truncRuntime = makeRuntime({ autoContinue: true, maxConsecutive: 0, delayMs: 1, onMaxTokens: true, keepAliveOnMaxTokens: false })
+hostModule.apply(truncRuntime.ctx, truncRuntime.live)
+truncRuntime.agents.set('session-8', { id: 'session-8', followup: (message) => truncRuntime.state.followups.push(message), steer: () => {} })
+truncRuntime.state.listeners.get('agent/assistant-stream')({ agent: { id: 'session-8' }, frame: { type: 'chunk', chunk: { type: 'finish', reason: { kind: 'max-tokens' } } } })
+truncRuntime.state.listeners.get('session/event')({ id: 'session-8' }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'max-tokens' } } })
+await truncRuntime.fireTimers()
+equal('host: a genuinely truncated turn continues', truncRuntime.state.followups.length, 1)
+equal('host: and the log line names the ceiling', host.planAutoContinue({ reason: 'max-tokens', truncated: true, config: host.resolveConfig({ autoContinue: true }), consecutive: 0 }).why, 'broken turn (max-tokens)')
+
+// The rescue case: the closing step finished normally, so the turn wears the
+// sticky reason but holds no unfinished work.
+const rescuedRuntime = makeRuntime({ autoContinue: true, maxConsecutive: 0, delayMs: 1, onMaxTokens: true, keepAliveOnMaxTokens: true })
+hostModule.apply(rescuedRuntime.ctx, rescuedRuntime.live)
+rescuedRuntime.agents.set('session-9', { id: 'session-9', followup: (message) => rescuedRuntime.state.followups.push(message), steer: () => {} })
+rescuedRuntime.state.listeners.get('agent/assistant-stream')({ agent: { id: 'session-9' }, frame: { type: 'chunk', chunk: { type: 'finish', reason: { kind: 'stop' } } } })
+rescuedRuntime.state.listeners.get('session/event')({ id: 'session-9' }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'max-tokens' } } })
+await rescuedRuntime.fireTimers()
+equal('host: a rescued turn is not continued again', rescuedRuntime.state.followups.length, 0)
+
+// No finish frame was ever observed: the durable reason is the only evidence, and
+// abandoning a turn the log calls truncated is the worse failure.
+const blindRuntime = makeRuntime({ autoContinue: true, maxConsecutive: 0, delayMs: 1, onMaxTokens: true })
+hostModule.apply(blindRuntime.ctx, blindRuntime.live)
+blindRuntime.agents.set('session-10', { id: 'session-10', followup: (message) => blindRuntime.state.followups.push(message), steer: () => {} })
+blindRuntime.state.listeners.get('session/event')({ id: 'session-10' }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'max-tokens' } } })
+await blindRuntime.fireTimers()
+equal('host: an unobserved closing step trusts the durable reason', blindRuntime.state.followups.length, 1)
+
+// The cause switch still outranks the verdict.
+const ceilingOff = makeRuntime({ autoContinue: true, maxConsecutive: 0, delayMs: 1, onMaxTokens: false })
+hostModule.apply(ceilingOff.ctx, ceilingOff.live)
+ceilingOff.agents.set('session-11', { id: 'session-11', followup: (message) => ceilingOff.state.followups.push(message), steer: () => {} })
+ceilingOff.state.listeners.get('agent/assistant-stream')({ agent: { id: 'session-11' }, frame: { type: 'chunk', chunk: { type: 'finish', reason: { kind: 'max-tokens' } } } })
+ceilingOff.state.listeners.get('session/event')({ id: 'session-11' }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'max-tokens' } } })
+await ceilingOff.fireTimers()
+equal('host: the ceiling cause can be excluded', ceilingOff.state.followups.length, 0)
+
+// A human stop still outranks the ceiling reason.
+const ceilingStop = makeRuntime({ autoContinue: true, maxConsecutive: 0, delayMs: 1, onMaxTokens: true, onAborted: true })
+hostModule.apply(ceilingStop.ctx, ceilingStop.live)
+ceilingStop.agents.set('session-12', { id: 'session-12', followup: (message) => ceilingStop.state.followups.push(message), steer: () => {} })
+ceilingStop.state.listeners.get('agent/assistant-stream')({ agent: { id: 'session-12' }, frame: { type: 'chunk', chunk: { type: 'finish', reason: { kind: 'max-tokens' } } } })
+ceilingStop.state.listeners.get('session/event')({ id: 'session-12' }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } } })
+await ceilingStop.fireTimers()
+equal('host: a user stop is not rescued by the ceiling tier', ceilingStop.state.followups.length, 0)
+
+// The finish watcher is per session: one session's truncated step must not
+// authorize a continuation of another session's turn.
+const crossRuntime = makeRuntime({ autoContinue: true, maxConsecutive: 0, delayMs: 1, onMaxTokens: true })
+hostModule.apply(crossRuntime.ctx, crossRuntime.live)
+const crossContinued = []
+for (const id of ['session-13', 'session-14']) {
+  crossRuntime.agents.set(id, { id, followup: () => crossContinued.push(id), steer: () => {} })
+}
+crossRuntime.state.listeners.get('agent/assistant-stream')({ agent: { id: 'session-13' }, frame: { type: 'chunk', chunk: { type: 'finish', reason: { kind: 'max-tokens' } } } })
+crossRuntime.state.listeners.get('session/event')({ id: 'session-14' }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'max-tokens' } } })
+await crossRuntime.fireTimers()
+equal('host: another session\'s finish cannot authorize a continue', crossContinued.length, 1)
+equal('host: and it is the ended session that continues', crossContinued.join(','), 'session-14')
+
+// The verdict is consumed by the turn that ended: a later identical turn with no
+// finish frame of its own must not reuse the previous turn's closing reason.
+crossRuntime.state.listeners.get('session/event')({ id: 'session-13' }, { type: 'turn/end', data: { turn: 2, reason: { kind: 'max-tokens' } } })
+await crossRuntime.fireTimers()
+equal('host: the closing finish is cleared with the turn', crossContinued.join(','), 'session-14,session-13')
+
 
 // ------------------------------------------- the transcript pass, over a DOM
 /**
@@ -1234,6 +1554,112 @@ equal('send: the composer control runs the continuation', hideDom.round.clicks, 
 clickFlags.prevented = 0
 capture[0]({ target: hideDom.card, preventDefault: () => { clickFlags.prevented += 1 }, stopPropagation: () => {}, stopImmediatePropagation: () => {} })
 equal('send: every other click passes straight through', clickFlags.prevented, 0)
+
+// A cut-off answer is the break the composer could not see before: the turn
+// reports `max-tokens`, and the closing step's own durable finish is what proves
+// the answer really stopped mid-sentence. That case must offer the continuation.
+const truncatedDom = transcriptDom()
+const truncatedWindow = windowOf([start(3, 300), human('write the report'), assistantStep('max-tokens'), end('max-tokens')])
+const truncatedRuntime = makeClientRuntime(truncatedDom.dom, { hideContinueRow: true, continuedRailMarks: 'hide', sendBecomesContinue: true }, truncatedWindow)
+clientBundleExports.apply(truncatedRuntime.ctx)
+truncatedRuntime.flush()
+truncatedRuntime.mountControl()
+truncatedRuntime.flush()
+equal('truncated: the shipped button carries the continuation', truncatedDom.send.getAttribute('data-dyn-continue'), '1')
+equal('truncated: it announces the continuation', truncatedDom.send.getAttribute('aria-label'), '继续上次任务')
+equal('truncated: and the tooltip names the output ceiling', (truncatedDom.send.getAttribute('title') ?? '').includes('输出上限'), true)
+
+// …and must stay quiet when tier 2 already carried that same turn to completion:
+// the end reason is identical, only the closing step differs.
+const rescuedDom = transcriptDom()
+const rescuedWindow = windowOf([start(3, 300), human('write the report'), assistantStep('max-tokens'), assistantStep('stop'), end('max-tokens')])
+const rescuedTurnRuntime = makeClientRuntime(rescuedDom.dom, { hideContinueRow: true, continuedRailMarks: 'hide', sendBecomesContinue: true }, rescuedWindow)
+clientBundleExports.apply(rescuedTurnRuntime.ctx)
+rescuedTurnRuntime.flush()
+rescuedTurnRuntime.mountControl()
+rescuedTurnRuntime.flush()
+equal('rescued: the shipped button stays the send button', rescuedDom.send.getAttribute('data-dyn-continue'), null)
+equal('rescued: and keeps its own label', rescuedDom.send.getAttribute('aria-label'), '发送消息')
+
+// ---- two composer surfaces in one document ----------------------------------
+// The shipped product renders one card per conversation, and the layout mounts
+// the centre panel through the keyed `main` slot, so two cards is not today's
+// shape. It is the shape this pass must not mis-handle the day it arrives: with
+// one plugin-wide `affordance` and a document-wide button sweep, nothing here can
+// tell which card belongs to which session.
+//
+// Two cards, each with its own primary control and its own round control. The
+// plugin must (a) dress neither send button, and (b) never resolve a click by
+// reaching into the other card.
+function twoComposerDom() {
+  const fixture = transcriptDom()
+  const second = fixture.dom.make('div', { 'data-composer-card': 'true' })
+  const secondSend = fixture.dom.make('button', { class: 'uV2eYG_primary', 'aria-label': '发送消息' })
+  secondSend.disabled = true
+  const secondRound = fixture.dom.make('button', { class: 'dyn-retry-round' })
+  secondRound.clicks = 0
+  secondRound.click = () => { secondRound.clicks += 1 }
+  second.append(fixture.dom.make('div', { contenteditable: 'true' }))
+  second.append(secondSend)
+  second.append(secondRound)
+  fixture.dom.document.body.append(second)
+  return { fixture, second, secondSend, secondRound }
+}
+
+const twoDom = twoComposerDom()
+const twoRuntime = makeClientRuntime(twoDom.fixture.dom, { hideContinueRow: true, continuedRailMarks: 'hide', sendBecomesContinue: true }, continuationWindow)
+clientBundleExports.apply(twoRuntime.ctx)
+twoRuntime.flush()
+twoRuntime.mountControl({}, 's1')
+twoRuntime.flush()
+equal('two cards: the plugin sees both', twoDom.fixture.dom.document.querySelectorAll('[data-composer-card]').length, 2)
+equal('two cards: the first send button is left alone', twoDom.fixture.send.getAttribute('data-dyn-continue'), null)
+equal('two cards: the second send button is left alone', twoDom.secondSend.getAttribute('data-dyn-continue'), null)
+equal('two cards: and neither is re-labelled', twoDom.secondSend.getAttribute('aria-label'), '发送消息')
+// The per-session round control is scoped by its own slot, so the stand-down
+// leaves it alone: it stays in the DOM as the affordance that always works, and
+// each card's control resolves inside its own card.
+equal('two cards: each card keeps its own round control', twoDom.fixture.card.querySelector('.dyn-retry-round') === twoDom.fixture.round, true)
+equal('two cards: and the second card keeps its own', twoDom.second.querySelector('.dyn-retry-round') === twoDom.secondRound, true)
+
+// A click that lands on a taken-over button while a second card exists must still
+// resolve inside its own card. This is the case the document-wide query got
+// wrong: it clicked whichever `.dyn-retry-round` came first in the document.
+const twoCapture = [...(twoDom.fixture.dom.documentListeners.get('click') ?? [])]
+globalThis.document = twoDom.fixture.dom.document
+// Dress the second card's button by hand: the stand-down leaves real buttons
+// bare, so this is the one state the guard has to survive — an attribute written
+// while single, still present when a second surface appears.
+twoDom.secondSend.setAttribute('data-dyn-continue', '1')
+const twoFlags = { prevented: 0, stopped: 0 }
+twoCapture[0]({
+  target: twoDom.secondSend,
+  preventDefault: () => { twoFlags.prevented += 1 },
+  stopPropagation: () => { twoFlags.stopped += 1 },
+  stopImmediatePropagation: () => { twoFlags.stopped += 1 },
+})
+equal('two cards: the click runs the clicked card\'s own control', twoDom.secondRound.clicks, 1)
+equal('two cards: and never the other card\'s', twoDom.fixture.round.clicks, 0)
+equal('two cards: the click still does not submit', twoFlags.prevented, 1)
+
+// With one card, the same click resolves to that card's own control — the
+// behaviour the scoped lookup has to preserve.
+const scopeDom = transcriptDom()
+const scopeRuntime = makeClientRuntime(scopeDom.dom, { hideContinueRow: true, continuedRailMarks: 'hide', sendBecomesContinue: true }, continuationWindow)
+clientBundleExports.apply(scopeRuntime.ctx)
+scopeRuntime.flush()
+scopeRuntime.mountControl({}, 's1')
+scopeRuntime.flush()
+const scopeCapture = [...(scopeDom.dom.documentListeners.get('click') ?? [])]
+globalThis.document = scopeDom.dom.document
+scopeCapture[0]({
+  target: scopeDom.send,
+  preventDefault: () => {},
+  stopPropagation: () => {},
+  stopImmediatePropagation: () => {},
+})
+equal('one card: the scoped lookup still runs the control', scopeDom.round.clicks, 1)
+equal('one card: the takeover is still offered', scopeDom.send.getAttribute('data-dyn-continue'), '1')
 
 // A composer the human is typing in keeps its send button: their message wins.
 const typingDom = transcriptDom()
