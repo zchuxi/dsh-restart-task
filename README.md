@@ -13,7 +13,7 @@ DeepSeek Harness **Web profile 插件**：输入框里的一个回合恢复控�
 
 | 层级 | 何时生效 | 对话记录里多出什么 |
 | --- | --- | --- |
-| 1. 调宽可见重试预算 | 模型请求失败 | 一条产品自带的重试行（实时倒计时，可停） |
+| 1. 调宽可见重试预算 | 模型请求失败 | 一条产品自带的重试行（实时倒计时，可停；重试结束后这条记录被收走，见 §2.1） |
 | 2. 同轮续写（keep-alive） | 回复撞上输出上限 | 不新开回合；续写那一行被隐藏 |
 | 3. 新开一轮继续 | 回合已经以失败收场 | 一个回合 + 一条折叠记录（默认隐藏） |
 
@@ -31,6 +31,8 @@ DeepSeek Harness **Web profile 插件**：输入框里的一个回合恢复控�
 在更旧的运行时上，bundle 会在启动时被 loader 按兼容性规则直接跳过（并给出 `dsh plugin allow-version` 这条明确的豁免途径）—— 这是诚实的结局：上面两条接缝在那里并不存在。0.2.0-rc.1 仍沿用同样的接缝（`agent/request-error` 瀑布、`retryPolicy`、`agent/turn-stopping`、会话投影、设置表单与 composer slot 都未变），所以放开兼容范围只需要改清单。
 
 **1.5.0 针对 0.2.0-rc.2 做的核对与补齐。** 上面每一条接缝都按运行中的 0.2.0-rc.2 实例重新核对过：`agent/request-error` 的 `retryPolicy` 仍是 `ResolvedRetryPolicy`（`mode` / `maxRetries` / `retryableCodes` / 扁平退避块），`agent/turn-stopping` 仍是 awaited 的 serial 事件、`agent.steer()` 仍把消息投进 `next-step`，`agent.followup()` 仍开新回合，`settings.configure(presentation, fiber)` 与「表单按 `entry.options.id` 寻址」的模型未变，`conversation.input.right` 与 `plugins.bundle.config` 两个 slot 也仍在原位。顺带补上了两处 0.2 才暴露出来的问题：`max-tokens` 这个**回合级**结束原因（见 §7），以及同轮续写可能把指令塞进一个人已经停掉的回合。
+
+**1.5.1。** 可见重试开始自己收尾：重试等待期间实时倒计时照常保留，重试结束（成功重发或被取消）后它留下的那条「已重试模型请求（N/M）」/「模型请求重试已取消（N/M）」记录会被收走（见 §2.1，`hideSettledRetry`）。
 
 ## 1. 手动控制
 
@@ -77,6 +79,20 @@ DeepSeek Harness **Web profile 插件**：输入框里的一个回合恢复控�
 打开 `retryForever` 换上的是 `{ mode: 'always', …退避 }`：执行器会对**任何**失败无限重试，没有终端错误的守卫 —— 所以它默认关闭，需要无人值守长任务时才开。
 
 只有**确实路由到了某份 retry 策略**的一步才会被调宽：一个请求若连 adapter 都没到达（`payload.retryPolicy` 为空），执行器本就会拒绝，硬塞一份策略也救不了它，于是原样委派，保留执行器自己的拒绝路径。因为重试完全交给产品的执行器来做与计数，本插件不再自己等待、不再维护每步计数器。
+
+### 2.1 已结束的重试记录不再留在对话里
+
+重试**进行中**的那条实时倒计时必须留着 —— 那是「可见重试」的全部意义。但重试一旦结束，产品仍会把那条记录留在对话里：重新发出请求后它变成「已重试模型请求（N/M）」，回合在等待中被关闭时它变成「模型请求重试已取消（N/M）」。请求已经成功、或者已经放弃，这条记录对用户就只剩噪音。
+
+所以 `hideSettledRetry`（默认**开**）补一条条件样式，与 §6 的续写行规则并列、同样只在有设置域时受开关控制：
+
+```css
+[data-chat-flow-kind="model-retry"]:not(:has(details[data-active])) { display: none !important; }
+```
+
+判据全部取自产品自己的渲染，没有一处是猜测：`model-retry` 是产品给重试节点起的 flow kind，而 `data-active` 是产品在「正在等待下一次重试」时给那个 `<details>` 加的属性 —— 重新发出请求（`started`）或取消（`cancelled`）之后 React 就不再输出它。于是这条规则**只收走已经结束的那一条**，倒计时照常跳动、也照常可点开看延迟与失败原因。
+
+它也不去分辨「这次重试是谁发起的」：只要本插件在接管重试预算（`retryFailedRequests` 为开），对话里的重试就都是它调宽后的结果；把「启用可见重试」关掉时这条规则**自动失效**，产品自己预算内产生的重试记录仍按产品原样显示 —— 隐藏别人 UI 的事，本插件不做。与 §6 的续写行一样，这读的是产品渲染而不是声明式 API：某版本若改了 flow kind 或去掉 `data-active`，规则会静默失效（记录只是重新显示出来，不会误伤别的行）。
 
 ## 3. 第 2 层 —— 同轮续写（不新开回合）
 
@@ -201,6 +217,7 @@ nav[data-dyn-continued-preview='1'] [class*='_previewPrompt'] { display: none !i
 | `onMaxTokens` | `true` | 回复撞到输出上限、没写完之后继续（只在本轮最后一步确实被截断时触发） |
 | `sendBecomesContinue` | `true` | 输入框为空时，把继续交给产品发送键（见 §1.1） |
 | `hideContinueRow` | `true` | 在 Chat 里隐藏本插件自己的折叠行 |
+| `hideSettledRetry` | `true` | 重试结束后收走那条「已重试 / 已取消」记录；重试中的倒计时保留（见 §2.1） |
 | `continuedRailMarks` | `hide` | 轨道如何呈现本插件继续出的轮次（`hide` / `preview` / `keep`） |
 | `continueText` | （内置） | 发给模型的继续指令 |
 

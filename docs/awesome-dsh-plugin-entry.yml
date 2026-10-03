@@ -23,4 +23,4 @@ category: ui
 description:
   en: Recovers broken DSH turns with a visible in-turn retry (the product's own retry budget, widened and rendered as a live countdown), an in-turn keep-alive for truncated output and an opt-in continuation turn, and hands the composer's send button the continuation while the composer is empty.
   zh: 三段式恢复被打断的回合（同一步内可见地重试——放大产品自带的重试预算并渲染成实时倒计时、输出超限同轮续写、可选的新开一轮继续），并在输入框为空时把「继续」交给发送键。
-tarball: https://github.com/zchuxi/dsh-restart-task/releases/download/v1.5.0/dsh-restart-task.tgz
+tarball: https://github.com/zchuxi/dsh-restart-task/releases/download/v1.5.1/dsh-restart-task.tgz

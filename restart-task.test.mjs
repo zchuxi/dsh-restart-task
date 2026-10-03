@@ -135,6 +135,7 @@ equal('defaults: consecutive cap 3', defaults.maxConsecutive, 3)
 equal('defaults: delay 1500', defaults.delayMs, 1500)
 equal('defaults: every broken reason enabled', defaults.onAborted && defaults.onError && defaults.onInterrupted, true)
 equal('defaults: continuation row hidden', defaults.hideContinueRow, true)
+equal('defaults: settled retry rows hidden', defaults.hideSettledRetry, true)
 equal('defaults: built-in continue text', defaults.continueText, host.DEFAULT_CONTINUE_TEXT)
 
 const junk = host.resolveConfig({ retryFailedRequests: 'yes', maxRequestRetries: '9', continueText: '   ', autoContinue: 1 })
@@ -143,9 +144,11 @@ equal('junk: non-number falls back to 30', junk.maxRequestRetries, 30)
 equal('junk: blank text falls back to built-in', junk.continueText, host.DEFAULT_CONTINUE_TEXT)
 equal('junk: truthy-but-not-true keeps auto-continue off', junk.autoContinue, false)
 
-const off = host.resolveConfig({ retryFailedRequests: false, keepAliveOnMaxTokens: false, hideContinueRow: false })
+const off = host.resolveConfig({ retryFailedRequests: false, keepAliveOnMaxTokens: false, hideContinueRow: false, hideSettledRetry: false })
 equal('explicit off is honoured', off.retryFailedRequests === false && off.keepAliveOnMaxTokens === false, true)
 equal('explicit show rows is honoured', off.hideContinueRow, false)
+equal('explicit retry receipts are honoured', off.hideSettledRetry, false)
+equal('junk: a non-boolean keeps retry receipts hidden', host.resolveConfig({ hideSettledRetry: 'no' }).hideSettledRetry, true)
 
 // ------------------------------------------------------------------ liveConfig
 // The loader hands `apply` a live reference per volatile field; a host without
@@ -160,7 +163,7 @@ equal('live: a volatile reference is unwrapped', liveRead.retryForever, true)
 equal('live: numbers survive the unwrap', liveRead.maxRequestRetries, 7)
 equal('live: a plain value passes through', liveRead.autoContinue, false)
 equal('live: a string reference is unwrapped', liveRead.continuedRailMarks, 'preview')
-equal('live: the reader covers every declared field', host.CONFIG_FIELDS.length, 17)
+equal('live: the reader covers every declared field', host.CONFIG_FIELDS.length, 18)
 equal('live: an absent config reads as defaults', host.resolveConfig(host.liveConfig(undefined)).maxRequestRetries, 30)
 equal('live: undefined reads as defaults', host.resolveConfig(host.liveConfig(undefined)).continueText, host.DEFAULT_CONTINUE_TEXT)
 
@@ -646,6 +649,7 @@ const rendered = new Set(cardFields())
 const missing = hostKeys.filter((key) => rendered.has(key) !== true)
 equal('card: renders every served setting', missing.join(','), '')
 equal('card: renders the retention toggle', rendered.has('hideContinueRow'), true)
+equal('card: renders the retry-receipt toggle', rendered.has('hideSettledRetry'), true)
 
 // The card's seat moved twice: `settings.plugin.item` was retired in 0.1.7 and a
 // list slot would reject a `key`, so the contribution is a keyed bundle seat on
@@ -671,6 +675,18 @@ equal('hide rule: ids our own rows by the provenance label', clientSource.includ
 equal('hide rule: never a phantom attribute value', clientSource.includes('data-context-source="dsh-restart-task"'), false)
 equal('hide rule: opt-out is honoured in the client', clientSource.includes('value.hideContinueRow !== false'), true)
 equal('hide rule: the tag is cleared on unload', clientSource.includes("document.querySelectorAll('[' + OWN_ROW_ATTR + ']')"), true)
+
+// A retry this plugin caused is executed by the product's own retry owner, which
+// writes the `llm/retry` events Chat renders. The plugin cannot mark those events
+// at the source, so the rule keys on the product's own rendered flow kind and
+// tells a live retry (which the user asked to see) from a settled one.
+equal('retry rows: keyed on the product\'s own flow kind', clientSource.includes('const HIDE_SETTLED_RETRY_CSS'), true)
+equal('retry rows: the flow kind is the product\'s', clientSource.includes('[data-chat-flow-kind="model-retry"]'), true)
+equal('retry rows: only a settled retry is hidden', clientSource.includes('[data-chat-flow-kind="model-retry"]:not(:has(details[data-active]))'), true)
+equal('retry rows: the live countdown stays', clientSource.includes('details[data-active] { display: none'), false)
+equal('retry rows: opt-out is honoured in the client', clientSource.includes('value.hideSettledRetry !== false'), true)
+equal('retry rows: hidden only while this plugin owns the budget', clientSource.includes('value.retryFailedRequests !== false'), true)
+equal('retry rows: both rules share the conditional tag', clientSource.includes("(hideRetry === true ? HIDE_SETTLED_RETRY_CSS : '')"), true)
 
 // Styles are owned by the module system through `data-plugin`: an untagged tag is
 // adopted by whichever plugin materializes next and removed on ITS unload.
@@ -1426,6 +1442,12 @@ equal('dom: the composer control and the card are both registered', hideRuntime.
 equal('dom: the stylesheet and the conditional row rule are both injected', hideDom.dom.styles().length, 2)
 equal('dom: the pass is observing', hideRuntime.state.observers, 1)
 equal('dom: the row rule hides only this plugin\'s own tags', hideDom.dom.styles()[1].textContent.includes('[data-chat-flow-kind="context"][data-dyn-restart-row="1"]'), true)
+// A settled retry row is not this plugin's markup, so the rule names the product's
+// flow kind — and only the settled half of it: a retry waiting out its backoff is
+// `scheduled` and carries `data-active`, and that countdown is what the user asked
+// to see.
+equal('dom: the settled retry rule rides the conditional sheet', hideDom.dom.styles()[1].textContent.includes('[data-chat-flow-kind="model-retry"]:not(:has(details[data-active]))'), true)
+equal('dom: and it leaves the live countdown alone', hideDom.dom.styles()[1].textContent.includes('details[data-active] { display: none'), false)
 
 const rowsIn = (fixture) => fixture.dom.document.querySelectorAll('[data-dyn-restart-row]')
 // Before the composer control mounts there is no window, so the steer row (which
@@ -1804,6 +1826,23 @@ equal('dom: the step-aside rule is always injected', showDom.dom.styles()[0].tex
 equal('dom: and the conditional sheet only carries the row rule', conditionalRule.includes("_primary"), false)
 equal('dom: the rows are still tagged, so the rail still knows them', showDom.dom.document.querySelectorAll('[data-dyn-restart-row]').length, 2)
 equal('dom: the rail mark is still hidden in hide mode', showDom.mark7.getAttribute('data-dyn-continued'), 'hide')
+
+// ---- retry receipts: gated on the boost, not on the row switch -----------------
+// Hiding a retry record is only this plugin's business while this plugin is the
+// one that widened the budget. With the boost off those retries are the product's
+// own, and the rule must not be written at all.
+const ownBudgetDom = transcriptDom()
+const ownBudgetRuntime = makeClientRuntime(ownBudgetDom.dom, { retryFailedRequests: false, hideSettledRetry: true }, continuationWindow)
+clientBundleExports.apply(ownBudgetRuntime.ctx)
+ownBudgetRuntime.flush()
+equal('retry rows: not hidden while the product owns the budget', ownBudgetDom.dom.styles()[1].textContent.includes('model-retry'), false)
+
+const keepReceiptsDom = transcriptDom()
+const keepReceiptsRuntime = makeClientRuntime(keepReceiptsDom.dom, { retryFailedRequests: true, hideSettledRetry: false }, continuationWindow)
+clientBundleExports.apply(keepReceiptsRuntime.ctx)
+keepReceiptsRuntime.flush()
+equal('retry rows: the switch brings the receipt back', keepReceiptsDom.dom.styles()[1].textContent.includes('model-retry'), false)
+equal('retry rows: and the row rule is unaffected', keepReceiptsDom.dom.styles()[1].textContent.includes('data-dyn-restart-row'), true)
 
 // ------------------------------------------------------------------------ report
 if (failures.length > 0) {

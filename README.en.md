@@ -14,7 +14,7 @@ The design rule everything follows: **recovery should be quiet, and only as visi
 
 | tier | when it applies | what the transcript gains |
 | --- | --- | --- |
-| 1. widen the visible retry budget | a model request failed | the product's own live retry countdown (owned by `dsh-llm-retry`) |
+| 1. widen the visible retry budget | a model request failed | the product's own live retry countdown (owned by `dsh-llm-retry`); the record is taken away once the retry settles (§2.1) |
 | 2. in-turn keep-alive | the reply hit the output ceiling | no new round; the continuation row is hidden |
 | 3. new continuation turn | the turn already ended broken | one round + one collapsed row (hidden by default) |
 
@@ -68,6 +68,10 @@ half puts them. It also closed two gaps that only 0.2 exposes: the **turn-level*
 `max-tokens` end reason (see §7), and an in-turn continue that could push an
 instruction into a turn the human had already stopped.
 
+**1.5.1.** The visible retry now cleans up after itself: the live countdown stays
+while a retry is waiting, and the record it leaves behind once the retry settles
+— "已重试模型请求（N/M）" / "模型请求重试已取消（N/M）" — is taken away (§2.1,
+`hideSettledRetry`).
 
 ## 1. The manual control
 
@@ -187,6 +191,39 @@ first (normal mode: five attempts with its own backoff) and only delegates with
 `next()` once that is exhausted, at which point this plugin's budget starts. The
 two budgets therefore add up — turn the shipped policy down, or this one off, if a
 failure should stop sooner.
+
+### 2.1 Settled retry records stop being kept
+
+The live countdown of a retry **in progress** has to stay — it is the whole point
+of a visible retry. But once a retry is over the product still leaves its record
+in the conversation: re-sending the request turns it into "已重试模型请求（N/M）",
+and a retry cancelled by a closing turn into "模型请求重试已取消（N/M）". The
+request either succeeded or was given up on, and at that point the record is
+nothing but noise.
+
+So `hideSettledRetry` (default **on**) adds one conditional rule, sitting beside
+the continuation-row rule of §6 and governed by a switch in the same way:
+
+```css
+[data-chat-flow-kind="model-retry"]:not(:has(details[data-active])) { display: none !important; }
+```
+
+Every part of that test is read off the product's own render, none of it guessed:
+`model-retry` is the flow kind the product gives a retry node, and `data-active`
+is the attribute it puts on that `<details>` exactly while a retry is waiting out
+its backoff — React stops emitting it once the request is re-sent (`started`) or
+the retry is cancelled (`cancelled`). The rule therefore takes away **only the
+settled record**; the countdown keeps ticking and stays expandable for its delay
+and failure reason.
+
+It also does not try to tell whose retry it was: while this plugin owns the retry
+budget (`retryFailedRequests` on), every retry in the transcript is one it
+widened. Turning the visible retry **off** makes this rule fall away with it, so
+retries the product runs on its own budget keep the product's own presentation —
+hiding someone else's UI is not this plugin's business. Like §6, it reads the
+product's render rather than a declared API: a release that renames the flow kind
+or drops `data-active` makes the rule stop matching (the record simply comes back;
+it never hides a row it cannot attribute).
 
 ## 3. Tier 2 — in-turn keep-alive (no new round)
 
@@ -435,6 +472,7 @@ write state and "全部恢复默认".
 | `onMaxTokens` | `true` | continue when the answer hit the output ceiling and stopped short (fires only when the closing step really was truncated) |
 | `sendBecomesContinue` | `true` | hand the shipped send button the continuation while the composer is empty (see §1.1) |
 | `hideContinueRow` | `true` | hide this plugin's own collapsed rows in Chat |
+| `hideSettledRetry` | `true` | take away the "已重试 / 已取消" record once a retry settles; the live countdown stays (see §2.1) |
 | `continuedRailMarks` | `hide` | how the rail presents rounds this plugin continued (`hide` / `preview` / `keep`) |
 | `continueText` | (built-in) | the instruction sent to the model |
 
